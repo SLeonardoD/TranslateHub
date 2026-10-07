@@ -1,0 +1,20 @@
+traslation_engine/
+├── app/
+│   ├── __init__.py
+│   ├── main.py              # Punto de entrada de FastAPI y definición de endpoints
+│   ├── config.py            # Carga y validación de model_info.json
+│   ├── services/
+│   │   ├── __init__.py
+│   │   └── translation.py   # Lógica de negocio: orquesta la traducción
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── model_manager.py # Gestor de modelos (carga, descarga, caché en RAM)
+│   │   └── exceptions.py    # Excepciones personalizadas
+│   └── models/
+│       ├── __init__.py
+│       └── schemas.py       # Modelos Pydantic para las peticiones/respuestas
+├── models/                  # Carpeta donde se guardan los modelos descargados
+├── model_info.json          # Catálogo de modelos disponibles
+├── r.txt
+├── r-dev.txt
+└── run.py                   # Script de arranque con info de red
