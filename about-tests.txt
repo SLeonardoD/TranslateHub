@@ -1,0 +1,11 @@
+# Toda la suite
+pytest -v
+
+# Solo un archivo
+pytest tests/test_model_manager.py -v
+
+# Con cobertura
+pytest --cov=app --cov-report=term-missing
+
+# Solo los tests que NO tocan torch (los de config y api con mock)
+pytest tests/test_config.py tests/test_api.py -v

@@ -1,4 +1,9 @@
 """Arranque del servidor con detección de IPs de LAN (funciona sin salida a Internet)."""
+import os
+
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 import ipaddress
 import socket
 

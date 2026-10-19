@@ -20,6 +20,7 @@ from app.config import (
 from .exceptions import ModelNotAvailableError, ModelLoadError
 from huggingface_hub import snapshot_download
 from pathlib import Path
+import shutil
 
 
 class ModelManager:
@@ -125,6 +126,8 @@ class ModelManager:
                 local_dir_use_symlinks=False,  # Fuerza archivos reales, no symlinks
             )
             print(f"✅ '{model_id}' descargado correctamente en {local_path}")
+
+            self._clean_model_cache(hf_name)  # Limpieza de caché global de Hugging Face
         except Exception as e:
             raise ModelLoadError(f"Error al descargar '{model_id}': {e}")
 
@@ -134,6 +137,15 @@ class ModelManager:
                 self.download_model(mid)
             except Exception as e:
                 print(f"❌ Error con '{mid}': {e}")
+
+    def _clean_model_cache(self, hf_name: str) -> None:
+        """Elimina la carpeta del modelo de la caché global de Hugging Face."""
+        cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+        cache_model_dir = cache_root / f"models--{hf_name.replace('/', '--')}"
+        if cache_model_dir.exists():
+            print(f"🧹 Borrando caché de '{hf_name}' en {cache_model_dir}...")
+            shutil.rmtree(cache_model_dir)
+            print("✅ Caché eliminada.")
 
     # ---------------- Carga (interno, asume lock tomado) ----------------
 
@@ -147,28 +159,48 @@ class ModelManager:
                 torch.cuda.empty_cache()
 
     def _ensure_model_loaded_locked(self, model_id: str) -> None:
-        """Asume lock tomado. Nunca descarga: falla si no está local."""
+        """Asume lock tomado. Nunca descarga: falla si no está local.
+
+        Garantías:
+        - `local_files_only=True`: transformers falla si falta algún archivo
+        en lugar de intentar descargarlo.
+        - No se toca `~/.cache/huggingface` porque `local_path` es una ruta
+        absoluta con todos los archivos necesarios.
+        """
+        # 1. Si ya está cargado, no hacer nada
         if self._current_model_id == model_id:
             return
 
+        # 2. Verificar que exista localmente antes de intentar cargar
         if not self.is_model_downloaded(model_id):
             raise ModelNotAvailableError(
                 f"'{model_id}' no está descargado localmente. "
                 f"Usa el CLI: python -m app.core.model_manager download {model_id}"
             )
 
+        # 3. Liberar el modelo anterior (si lo hay)
         self._unload_locked()
 
+        # 4. Cargar desde la ruta local, sin red ni caché
         local_path = self._get_local_path(model_id)
         print(f"📥 Cargando '{model_id}' desde {local_path}...")
         try:
-            self._tokenizer = AutoTokenizer.from_pretrained(str(local_path))
-            self._model = AutoModelForSeq2SeqLM.from_pretrained(str(local_path))
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                str(local_path),
+                local_files_only=True,   # ⛔ nada de red ni caché
+            )
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(
+                str(local_path),
+                local_files_only=True,   # ⛔ idem
+            )
+
             if torch.cuda.is_available():
                 self._model = self._model.to("cuda")
+
             self._current_model_id = model_id
             print(f"✅ '{model_id}' listo.")
         except Exception as e:
+            # Limpieza en caso de fallo parcial
             self._model = None
             self._tokenizer = None
             self._current_model_id = None
