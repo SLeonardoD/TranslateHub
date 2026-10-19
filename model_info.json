@@ -1,0 +1,43 @@
+{
+  "models": {
+    "opus-mt-en-es": {
+      "hf_name": "Helsinki-NLP/opus-mt-en-es",
+      "family": "opus-mt",
+      "type": "pair",
+      "source_lang": "en",
+      "target_lang": "es",
+      "tier": "fast",
+      "description": "OPUS-MT inglés→español, rápido y ligero",
+      "default_max_length": 512
+    },
+    "opus-mt-es-en": {
+      "hf_name": "Helsinki-NLP/opus-mt-es-en",
+      "family": "opus-mt",
+      "type": "pair",
+      "source_lang": "es",
+      "target_lang": "en",
+      "tier": "fast",
+      "description": "OPUS-MT español→inglés, rápido y ligero",
+      "default_max_length": 512
+    },
+    "nllb-200-distilled-600M": {
+      "hf_name": "facebook/nllb-200-distilled-600M",
+      "family": "nllb",
+      "type": "multilingual",
+      "tier": "quality",
+      "supported_pairs": [
+        ["en", "es"], ["es", "en"],
+        ["en", "fr"], ["fr", "en"],
+        ["en", "de"], ["de", "en"]
+      ],
+      "language_code_map": {
+        "en": "eng_Latn",
+        "es": "spa_Latn",
+        "fr": "fra_Latn",
+        "de": "deu_Latn"
+      },
+      "description": "NLLB-200 distilled 600M, multilingüe de alta calidad",
+      "default_max_length": 512
+    }
+  }
+}

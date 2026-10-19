@@ -1,0 +1,15 @@
+-r r.txt
+
+# --- Testing ---
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+httpx>=0.27.0               # Cliente HTTP para testear FastAPI
+
+# --- Calidad de código ---
+ruff>=0.7.0                 # Linter + formatter (sustituye a flake8 + isort + black)
+mypy>=1.13.0                # Tipado estático
+types-psutil>=6.0.0         # Stubs de psutil para mypy
+
+# --- Utilidades de desarrollo ---
+ipython>=8.29.0             # REPL interactivo para probar el ModelManager
