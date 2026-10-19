@@ -18,6 +18,8 @@ from app.config import (
     load_catalog,
 )
 from .exceptions import ModelNotAvailableError, ModelLoadError
+from huggingface_hub import snapshot_download
+from pathlib import Path
 
 
 class ModelManager:
@@ -114,13 +116,15 @@ class ModelManager:
             print(f"✅ '{model_id}' ya está descargado en {local_path}")
             return
 
-        print(f"⬇️ Descargando '{hf_name}' en {local_path}...")
+        print(f"⬇️ Descargando '{hf_name}' directamente en {local_path}...")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(hf_name)
-            model = AutoModelForSeq2SeqLM.from_pretrained(hf_name)
-            tokenizer.save_pretrained(str(local_path))
-            model.save_pretrained(str(local_path))
-            print(f"✅ '{model_id}' descargado correctamente.")
+            local_path.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=hf_name,
+                local_dir=str(local_path),
+                local_dir_use_symlinks=False,  # Fuerza archivos reales, no symlinks
+            )
+            print(f"✅ '{model_id}' descargado correctamente en {local_path}")
         except Exception as e:
             raise ModelLoadError(f"Error al descargar '{model_id}': {e}")
 
