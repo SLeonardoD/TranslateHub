@@ -10,3 +10,4 @@ models/
 .mypy_cache/
 coverage.xml
 htmlcov/
+translator.log
