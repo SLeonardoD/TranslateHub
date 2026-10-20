@@ -6,6 +6,7 @@ pydantic>=2.9.0
 # --- Inferencia / NLP ---
 transformers>=5.0.0
 torch>=2.4.0
+huggingface_hub>=0.26.0     # Descarga de modelos (CLI)
 sentencepiece>=0.2.0        # Tokenizadores de OPUS-MT y NLLB
 sacremoses>=0.1.1           # Requerido por tokenizadores Marian (OPUS-MT)
 protobuf>=4.25.0            # Requerido por algunos tokenizers (NLLB)
