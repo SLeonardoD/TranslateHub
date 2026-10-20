@@ -14,6 +14,8 @@ API HTTP local para servir capacidades de traducción usando modelos de Hugging 
 - **Descarga controlada y verificada**: la API **nunca** descarga modelos; eso se hace desde el CLI. Un modelo solo cuenta como descargado cuando la descarga terminó (una descarga interrumpida ya no se confunde con una completa) y solo se bajan los pesos PyTorch necesarios.
 - **Selección flexible**: el cliente puede pedir un modelo explícito o dejar que el servidor resuelva según idioma y tier.
 - **Errores claros**: `404` (modelo/par no disponible), `422` (petición inválida), `503` (cola llena), `500` (fallo real de carga o inferencia).
+- **Solo modelos locales**: la API únicamente "ve" y usa modelos descargados por completo en `models/`. `/models` y `/pairs` solo muestran esos; pedir uno que no está (o está incompleto) da error `404` con el comando de descarga. En runtime **no hay ninguna vía para descargar**.
+- **Log de operaciones en vivo**: `translator.log` en la raíz registra cada petición (cuándo, quién, para qué, resultado) y todas las excepciones con su traceback. Ver [Log de operaciones](#-log-de-operaciones).
 - **Seguridad opcional**: API key por cabecera y CORS, desactivados por defecto.
 - **Detección de IPs de LAN**: `run.py` imprime las IPs locales sin depender de Internet, descartando adaptadores virtuales (Docker, WSL, VirtualBox, VPN…) y poniendo primero la interfaz real.
 
@@ -27,7 +29,7 @@ mi_servidor_traduccion/
 │   ├── __init__.py
 │   ├── main.py              # Endpoints FastAPI, errores HTTP, API key y CORS
 │   ├── config.py            # Ajustes (variables de entorno) y catálogo validado
-│   ├── logging_setup.py     # Configuración de logs
+│   ├── logging_setup.py     # Logs: consola + archivo rotativo, id de petición
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── concurrency.py   # Cola FIFO de traducciones
@@ -47,7 +49,8 @@ mi_servidor_traduccion/
 ├── pyproject.toml           # Configuración de ruff / pytest
 ├── requirements.txt         # Dependencias de producción
 ├── requirements-dev.txt     # Dependencias de desarrollo
-├── run.py                   # Arranque con detección de IP
+├── run.py                   # Arranque con detección de IP y log a archivo
+├── translator.log           # Log de operaciones (se crea al arrancar con run.py)
 └── .gitignore
 ```
 
@@ -104,7 +107,11 @@ python -m app.core.model_manager download-all
 python -m app.core.model_manager download opus-mt-en-es --force
 ```
 
-> ⚠️ La API **no descarga modelos**. Si una petición llega para un modelo no descargado, devolverá un error 404 con el comando exacto a ejecutar.
+> ⚠️ La API **no descarga modelos**. Si una petición llega para un modelo no descargado (o incompleto), devolverá un error 404 con el comando exacto a ejecutar.
+
+**Dónde se guardan los archivos**: `download` escribe **directamente en `models/<dueño>__<modelo>/`**, sin pasar por la caché de Hugging Face (`~/.cache/huggingface`), así que no hay espacio duplicado. Dentro de la carpeta del modelo queda una carpeta oculta `.cache/` de unos pocos KB que `huggingface_hub` usa para reanudar descargas. Si por algún motivo la librería necesitara una caché temporal, se crea en `models/.hf_tmp/` y se borra al terminar. No se toca nunca la caché global (puede contener modelos de otros proyectos).
+
+> 🧹 Si descargaste modelos con la versión anterior, puede haber copias en `~/.cache/huggingface/hub/models--...`: son redundantes y puedes borrarlas a mano. Para comprobar que una descarga no duplica nada, compara el tamaño de esa carpeta antes y después.
 
 > 🔁 **Si ya tenías modelos descargados con una versión anterior**, aparecerán como ⚠️ porque aún no tienen la marca de "descarga completa". Ejecuta `download <model_id>` una vez por cada uno: reutiliza/valida los archivos existentes, descarga lo que falte y lo marca como completo. Puedes borrar de `models/` los pesos duplicados (`*.h5`, `*.ot`…) para recuperar espacio.
 
@@ -151,6 +158,10 @@ Todas son opcionales. Se leen al arrancar.
 | `TRANSLATOR_CORS_ORIGINS` | — | Orígenes permitidos para navegadores, separados por comas. |
 | `TRANSLATOR_MODELS_DIR` | `./models` | Carpeta de los modelos descargados. |
 | `TRANSLATOR_LOG_LEVEL` | `INFO` | Nivel de logs. |
+| `TRANSLATOR_LOG_FILE` | `translator.log` | Archivo de log (ruta relativa a la raíz del proyecto, o absoluta). `off` lo desactiva. |
+| `TRANSLATOR_LOG_MAX_MB` | `10` | Tamaño a partir del cual el log rota. |
+| `TRANSLATOR_LOG_BACKUPS` | `5` | Archivos rotados que se conservan (`translator.log.1`, `.2`…). |
+| `TRANSLATOR_LOG_TEXT_PREVIEW` | `0` | Caracteres del texto traducido que se anotan en el log. `0` = **nunca se registra el texto**. |
 
 Ejemplos:
 
@@ -209,7 +220,7 @@ Estado del servidor (siempre abierto, útil como health-check).
 
 ### `GET /models`
 
-Lista todos los modelos del catálogo con su estado.
+Lista los modelos **disponibles en local** (descargados por completo). Los que solo existen en el catálogo, o tienen la descarga incompleta, no aparecen: para verlos usa `python -m app.core.model_manager list`.
 
 **Respuesta** `200 OK`:
 ```json
@@ -247,14 +258,14 @@ Lista todos los modelos del catálogo con su estado.
 ]
 ```
 
-- `downloaded`: la descarga terminó y verificó correctamente.
+- `downloaded`: siempre `true` aquí (solo se listan modelos locales completos); se mantiene por compatibilidad.
 - `loaded`: el modelo está actualmente en RAM.
 
 ---
 
 ### `GET /pairs`
 
-Lista los pares de idiomas cubiertos y qué modelos los sirven.
+Lista los pares de idiomas que pueden traducirse **con los modelos locales** y qué modelos los sirven. El ejemplo supone los tres modelos descargados:
 
 **Respuesta** `200 OK`:
 ```json
@@ -288,6 +299,10 @@ Traduce un texto. Acepta dos formas de seleccionar el modelo:
 
 \* Debes enviar `model_id` **o** (`source_lang` + `target_lang`). Si envías `model_id`, `source_lang`/`target_lang` son opcionales salvo para modelos multilingües (donde son obligatorios). En modelos de par, si los envías **deben coincidir con el par nativo del modelo** (tanto origen como destino).
 
+Si no indicas `model_id`, el servidor elige **entre los modelos locales** que cubren el par (prefiriendo `fast`, o el `tier` pedido). Si el más rápido no está descargado pero NLLB sí, usa NLLB; si ninguno está, `404`.
+
+**Cabeceras opcionales**: `X-Client-Name: mi-app` identifica a tu aplicación en el log. Toda respuesta incluye `X-Request-ID`, el id de la petición en el log (útil para localizar un error).
+
 **Respuesta** `200 OK`:
 ```json
 {
@@ -312,7 +327,7 @@ Traduce un texto. Acepta dos formas de seleccionar el modelo:
 | Código | Causa |
 |---|---|
 | `401` | Falta o es incorrecta la API key (solo si `TRANSLATOR_API_KEY` está definida). |
-| `404` | Modelo no definido en el catálogo, no descargado (o descarga incompleta), o par de idiomas no soportado. |
+| `404` | Modelo no definido en el catálogo, no descargado en local (o descarga incompleta), ningún modelo local cubre el par, o par no soportado por el modelo. El mensaje indica el comando de descarga. |
 | `422` | Petición inválida: texto vacío o demasiado largo, falta `model_id` o par de idiomas, `tier`/`max_length` fuera de rango, idioma no soportado por el modelo, modelo multilingüe sin idiomas… |
 | `503` | Cola llena (`TRANSLATOR_MAX_PENDING_REQUESTS`). Incluye cabecera `Retry-After`. |
 | `500` | Fallo real al cargar el modelo en memoria o durante la inferencia (por ejemplo, falta de memoria). El traceback queda en la consola del servidor. |
@@ -370,6 +385,58 @@ El servidor atiende las traducciones **de una en una, en orden de llegada**, pen
 - `GET /` muestra cuántas hay pendientes (`queue.pending`).
 
 > ⏱️ Con cola, un cliente puede esperar mucho: usa un *timeout* generoso (120 s o más) o consulta `GET /` antes de enviar.
+
+---
+
+## 📝 Log de operaciones
+
+Al arrancar con `python run.py` se crea `translator.log` en la raíz del proyecto. Se escribe **en vivo** (cada línea se guarda al instante) y registra:
+
+- **Cada petición a la API**: cuándo, quién, para qué y cómo terminó.
+- **Excepciones**, con su traceback completo (fallos de carga del modelo, errores de inferencia, errores no previstos).
+- **Eventos del servidor**: arranque (con modelos locales y configuración), parada, carga y descarga de modelos de la RAM.
+
+Ejemplo:
+
+```text
+2026-10-19 23:16:36 INFO    [4f2a91c0] translator.access: ip=192.168.1.50 client="app-facturacion" ua="python-requests/2.32.3" POST /translate status=200 ms=842 | op=translate model=opus-mt-en-es pair=en>es tier=- chars=120 chunks=1 truncated=False warnings=0 work_ms=830 queued_ms=12
+2026-10-19 23:16:41 WARNING [b82be0b8] translator.access: ip=192.168.1.50 client="app-facturacion" ua="python-requests/2.32.3" POST /translate status=404 ms=3 | op=translate model=auto pair=en>fr tier=- chars=5 work_ms=0 queued_ms=2 error="Ningún modelo local cubre en→fr. Descarga uno con el CLI: ..."
+```
+
+| Campo | Significado |
+|---|---|
+| fecha y hora | Cuándo (hora local del servidor). |
+| nivel | `INFO` ok · `WARNING` error del cliente (4xx) o cola llena (503) · `ERROR` fallo del servidor (500). |
+| `[4f2a91c0]` | Id de la petición. Es el mismo que recibe el cliente en la cabecera `X-Request-ID`, y aparece también en las líneas del gestor de modelos (p. ej. "Cargando modelo…") y en los tracebacks de esa petición. |
+| `ip` | **Quién**: dirección del equipo que llama. |
+| `client` | **Quién**: nombre que la aplicación cliente declare en la cabecera `X-Client-Name` (`-` si no la envía). |
+| `ua` | **Quién**: `User-Agent` (la librería o programa que hace la llamada). |
+| `POST /translate status=200 ms=842` | **Qué**: método, ruta, código de respuesta y duración total. |
+| `op` | **Para qué**: `translate`, `translate_batch`, `list_models`, `list_pairs`, `health`. |
+| `model`, `pair`, `tier` | Modelo usado (o `auto` si falló antes de resolverlo), par de idiomas y tier pedido. |
+| `chars`, `texts`, `chunks` | Tamaño de la petición (caracteres, nº de textos en un lote) y en cuántos fragmentos se dividió. |
+| `truncated`, `warnings` | Si la salida pudo quedar incompleta y cuántos avisos se devolvieron. |
+| `work_ms`, `queued_ms` | Tiempo traduciendo y tiempo esperando turno en la cola. |
+| `error` | Motivo del fallo, si lo hubo. |
+
+Consejos:
+
+```bash
+tail -f translator.log                      # seguirlo en vivo (Linux/macOS)
+Get-Content translator.log -Wait -Tail 20   # seguirlo en vivo (PowerShell)
+grep "ip=192.168.1.50" translator.log       # todo lo que hizo un equipo
+grep -E "ERROR|WARNING" translator.log      # solo problemas
+grep "4f2a91c0" translator.log              # todo lo ocurrido en una petición (con su traceback)
+```
+
+Detalles a tener en cuenta:
+
+- **Privacidad**: el texto traducido **no se registra** (solo su longitud). Si necesitas ver el inicio de los textos para depurar, activa `TRANSLATOR_LOG_TEXT_PREVIEW=80`. Las API keys nunca se registran.
+- **Seguridad del log**: los datos que envía el cliente (cabeceras, rutas…) se sanean (sin saltos de línea ni comillas), de modo que nadie puede falsificar líneas del log.
+- **Rotación**: al llegar a `TRANSLATOR_LOG_MAX_MB` el archivo pasa a `translator.log.1` (y los anteriores se desplazan), conservando `TRANSLATOR_LOG_BACKUPS`. No crece sin límite.
+- **IP detrás de un proxy**: si pones el servidor detrás de un proxy inverso, `ip` será la del proxy.
+- `X-Client-Name` lo declara el propio cliente: sirve para organizar, no es una identificación segura. Para controlar el acceso usa `TRANSLATOR_API_KEY`.
+- El log solo se activa con `python run.py`. Si arrancas con `uvicorn app.main:app` directamente, solo hay log por consola.
 
 ---
 
@@ -442,7 +509,7 @@ curl http://localhost:8000/pairs
 curl http://localhost:8000/models
 ```
 
-Te dice qué modelos están descargados (`downloaded: true`) y cuáles están en RAM ahora mismo (`loaded: true`). Útil para depurar antes de enviar peticiones.
+Te dice qué modelos hay disponibles en local y cuáles están en RAM ahora mismo (`loaded: true`). Útil para depurar antes de enviar peticiones.
 
 ---
 
@@ -575,7 +642,7 @@ El catálogo define qué modelos conoce el sistema. Puedes tener **muchos defini
 
 **Reglas de oro**:
 
-- **La API nunca descarga**. Si el modelo no está local, se devuelve un error 404 accionable.
+- **La API nunca descarga y solo ve modelos locales completos**. Si el modelo no está, se devuelve un error 404 accionable.
 - **Pocos modelos en RAM** (uno por defecto). Cargar otro descarta el menos usado.
 - **Acceso atómico**. Cola FIFO + lock: si llega una petición para otro modelo mientras hay una en curso, espera su turno.
 - **Nada se pierde en silencio**. Texto largo → troceado; salida cortada → `truncated`.
@@ -590,7 +657,7 @@ pytest
 ruff check .
 ```
 
-La suite no necesita descargar modelos: usa un tokenizador y un modelo falsos. Incluye una prueba de integración con un modelo Marian diminuto (pesos aleatorios, sin red) que se ejecuta solo si tienes `torch`, `transformers` y `sentencepiece` instalados.
+La suite no necesita descargar modelos: usa un tokenizador y un modelo falsos. Cubre, entre otras cosas, el log (`tests/test_logging.py`) y que la API nunca intenta descargar. Incluye una prueba de integración con un modelo Marian diminuto (pesos aleatorios, sin red) que se ejecuta solo si tienes `torch`, `transformers` y `sentencepiece` instalados.
 
 ---
 
@@ -604,7 +671,7 @@ Es el comportamiento esperado. Ejecuta el comando que indica el error:
 python -m app.core.model_manager download <model_id>
 ```
 
-Si el mensaje dice "(o la descarga quedó incompleta)", es que la descarga se interrumpió o es de una versión anterior: el mismo comando la repara.
+Si el mensaje dice "(o la descarga quedó incompleta)", es que la descarga se interrumpió, es de una versión anterior o se borraron archivos del modelo: el mismo comando la repara.
 
 ### El servidor responde 503
 

@@ -83,9 +83,56 @@ def test_404_unknown_model(client):
 
 def test_404_not_downloaded_gives_the_command(client, manager):
     (manager._get_local_path("opus-mt-es-en") / ".download_complete").unlink()
-    r = post_translate(client, text="x", source_lang="es", target_lang="en")
+    r = post_translate(client, text="x", model_id="opus-mt-es-en")
     assert r.status_code == 404
     assert "model_manager download opus-mt-es-en" in r.json()["detail"]
+
+
+def test_models_and_pairs_only_show_complete_local_models(client, manager):
+    (manager._get_local_path("opus-mt-es-en") / ".download_complete").unlink()  # incompleto
+    manager._get_local_path("nllb-200-distilled-600M").joinpath(
+        "model.safetensors"
+    ).unlink()  # sin pesos
+    assert [m["model_id"] for m in client.get("/models").json()] == ["opus-mt-en-es"]
+    pairs = client.get("/pairs").json()
+    assert pairs == [{"source_lang": "en", "target_lang": "es", "models": ["opus-mt-en-es"]}]
+
+
+def test_pair_resolution_only_considers_local_models(client, manager):
+    """es→en: el modelo rápido no está completo, pero NLLB sí => se usa NLLB, no hay error."""
+    (manager._get_local_path("opus-mt-es-en") / ".download_complete").unlink()
+    r = post_translate(client, text="hola", source_lang="es", target_lang="en")
+    assert r.status_code == 200
+    assert r.json()["model_id"] == "nllb-200-distilled-600M"
+
+
+def test_404_when_no_local_model_covers_the_pair(client, manager):
+    for mid in ("opus-mt-es-en", "nllb-200-distilled-600M"):
+        (manager._get_local_path(mid) / ".download_complete").unlink()
+    r = post_translate(client, text="hola", source_lang="es", target_lang="en")
+    assert r.status_code == 404
+    assert "Ningún modelo local" in r.json()["detail"]
+    assert "download opus-mt-es-en" in r.json()["detail"]
+
+
+def test_api_never_downloads_anything(client, manager, monkeypatch):
+    """En runtime la API no puede descargar: ni siquiera importa/llama a huggingface_hub."""
+    import sys
+    import types
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("¡la API intentó descargar un modelo!")
+
+    hub = types.ModuleType("huggingface_hub")
+    hub.HfApi = forbidden
+    hub.snapshot_download = forbidden
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    (manager._get_local_path("opus-mt-en-es") / ".download_complete").unlink()
+    assert post_translate(client, text="x", model_id="opus-mt-en-es").status_code == 404
+    assert post_translate(client, text="x", source_lang="en", target_lang="fr").status_code == 200
+    client.get("/models")
+    client.get("/pairs")
 
 
 def test_404_target_mismatch_on_pair_model(client):

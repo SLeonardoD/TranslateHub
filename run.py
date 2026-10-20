@@ -16,6 +16,7 @@ import uvicorn  # noqa: E402
 try:
     from app.config import load_catalog, settings  # noqa: E402
     from app.core.exceptions import CatalogError  # noqa: E402
+    from app.logging_setup import build_log_config  # noqa: E402
 except ValueError as exc:  # variable de entorno TRANSLATOR_* inválida
     sys.exit(f"❌ Configuración inválida: {exc}")
 
@@ -129,5 +130,19 @@ if __name__ == "__main__":
     print(f"   📦 Modelos en el catálogo: {len(catalog)}")
     if settings.api_key:
         print("   🔑 API key activada (cabecera X-API-Key).")
+    log_file = settings.resolve_log_file()
+    print(f"   📝 Log: {log_file if log_file else 'desactivado'}")
     print("=" * 60)
-    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=False)
+
+    # Consola + archivo (se escribe en vivo). El access log de uvicorn se sustituye por el
+    # de la aplicación (translator.access), que añade quién llama y para qué.
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=False,
+        access_log=False,
+        log_config=build_log_config(
+            settings.log_level, log_file, settings.log_max_mb, settings.log_backups
+        ),
+    )

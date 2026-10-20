@@ -9,6 +9,7 @@ from app.core.exceptions import (
     ModelLoadError,
     ModelNotAvailableError,
 )
+from app.core.model_manager import COMPLETE_MARKER
 from tests.conftest import FakeManager, mark_downloaded
 
 # ---------- Descarga: el marcador decide ----------
@@ -211,9 +212,10 @@ def fake_hub(monkeypatch):
         def list_repo_files(self, repo_id):
             return ["config.json", "model.safetensors", "pytorch_model.bin", "tf_model.h5"]
 
-    def snapshot_download(repo_id, local_dir, ignore_patterns=None):
+    def snapshot_download(repo_id, local_dir, cache_dir=None, ignore_patterns=None):
         state["downloads"] += 1
         state["ignore"] = ignore_patterns
+        state["cache_dir"] = cache_dir
         from pathlib import Path
 
         (Path(local_dir) / "config.json").write_text("{}")  # llega antes que los pesos
@@ -262,7 +264,7 @@ def test_download_is_skipped_when_complete_unless_forced(catalog, models_dir, fa
 def test_download_without_weights_does_not_write_marker(catalog, models_dir, fake_hub, monkeypatch):
     import huggingface_hub
 
-    def only_config(repo_id, local_dir, ignore_patterns=None):
+    def only_config(repo_id, local_dir, cache_dir=None, ignore_patterns=None):
         from pathlib import Path
 
         (Path(local_dir) / "config.json").write_text("{}")
@@ -302,3 +304,50 @@ def test_truncated_flags_distinguishes_rows_that_finished_from_rows_that_were_cu
 
 def test_truncated_flags_without_pad_id():
     assert mm.truncated_flags([5], output_len=4, max_new_tokens=3, pad_id=None) == [True]
+
+
+# ---------- Solo modelos locales y sin caché global ----------
+
+
+def test_removed_weights_make_the_model_unavailable(manager):
+    manager._get_local_path("opus-mt-en-es").joinpath("model.safetensors").unlink()
+    assert not manager.is_model_downloaded("opus-mt-en-es")
+    with pytest.raises(ModelNotAvailableError):
+        manager.translate_batch("opus-mt-en-es", ["x"])
+
+
+def test_local_only_listing_and_resolution(manager):
+    (manager._get_local_path("opus-mt-en-es") / COMPLETE_MARKER).unlink()
+    assert [m["model_id"] for m in manager.list_models(local_only=True)] == [
+        "opus-mt-es-en",
+        "nllb-200-distilled-600M",
+    ]
+    assert len(manager.list_models()) == 3  # el catálogo completo sigue disponible para el CLI
+    assert manager.resolve_model_id("en", "es", local_only=True) == "nllb-200-distilled-600M"
+    assert manager.resolve_model_id("en", "es") == "opus-mt-en-es"
+
+
+def test_local_only_error_suggests_the_download(manager):
+    (manager._get_local_path("opus-mt-en-es") / COMPLETE_MARKER).unlink()
+    (manager._get_local_path("nllb-200-distilled-600M") / COMPLETE_MARKER).unlink()
+    with pytest.raises(ModelNotAvailableError, match="download opus-mt-en-es"):
+        manager.resolve_model_id("en", "es", local_only=True)
+    with pytest.raises(ModelNotAvailableError, match="No hay modelos definidos"):
+        manager.resolve_model_id("en", "ja", local_only=True)
+
+
+def test_download_goes_straight_to_models_dir_and_leaves_no_cache(catalog, models_dir, fake_hub):
+    mgr = FakeManager(catalog=catalog, models_dir=models_dir)
+    mgr.download_model("opus-mt-en-es")
+    # cualquier caché temporal vive dentro de models/ (nunca en ~/.cache) y se borra al terminar
+    assert str(fake_hub["cache_dir"]).startswith(str(models_dir))
+    assert not (models_dir / ".hf_tmp").exists()
+    assert (models_dir / "Helsinki-NLP__opus-mt-en-es" / "model.safetensors").exists()
+
+
+def test_failed_download_also_cleans_temp_cache(catalog, models_dir, fake_hub):
+    mgr = FakeManager(catalog=catalog, models_dir=models_dir)
+    fake_hub["fail_after_config"] = True
+    with pytest.raises(ModelLoadError):
+        mgr.download_model("opus-mt-en-es")
+    assert not (models_dir / ".hf_tmp").exists()

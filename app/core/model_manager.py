@@ -14,6 +14,8 @@
 import gc
 import json
 import logging
+import os
+import shutil
 import sys
 import threading
 import time
@@ -129,13 +131,20 @@ class ModelManager:
             raise ModelNotAvailableError(f"Modelo '{model_id}' no definido en el catálogo.")
         return self._catalog[model_id]
 
-    def list_models(self) -> list[dict]:
-        return [{"model_id": mid, **info} for mid, info in self._catalog.items()]
+    def list_models(self, local_only: bool = False) -> list[dict]:
+        """Modelos del catálogo; con ``local_only`` solo los descargados por completo."""
+        return [
+            {"model_id": mid, **info}
+            for mid, info in self._catalog.items()
+            if not local_only or self.is_model_downloaded(mid)
+        ]
 
-    def list_pairs(self) -> list[dict]:
+    def list_pairs(self, local_only: bool = False) -> list[dict]:
         """Agrupa los modelos por par de idiomas para descubrimiento."""
         pairs: dict[tuple[str, str], list[str]] = {}
         for mid, info in self._catalog.items():
+            if local_only and not self.is_model_downloaded(mid):
+                continue
             if info["type"] == "pair":
                 pairs.setdefault((info["source_lang"], info["target_lang"]), []).append(mid)
             else:
@@ -151,28 +160,45 @@ class ModelManager:
             return info["source_lang"] == src and info["target_lang"] == tgt
         return [src, tgt] in info.get("supported_pairs", [])
 
-    def get_models_for_pair(self, src: str, tgt: str, tier: str | None = None) -> list[str]:
+    def get_models_for_pair(
+        self, src: str, tgt: str, tier: str | None = None, local_only: bool = False
+    ) -> list[str]:
         """Devuelve los model_id que cubren el par, opcionalmente filtrados por tier."""
         return [
             mid
             for mid, info in self._catalog.items()
-            if self.model_supports_pair(info, src, tgt) and (not tier or info.get("tier") == tier)
+            if self.model_supports_pair(info, src, tgt)
+            and (not tier or info.get("tier") == tier)
+            and (not local_only or self.is_model_downloaded(mid))
         ]
 
-    def resolve_model_id(self, src: str, tgt: str, tier: str | None = None) -> str:
+    def _by_preference(self, model_ids: list[str]) -> list[str]:
+        return sorted(
+            model_ids,
+            key=lambda mid: TIER_PREFERENCE.get(self._catalog[mid].get("tier", "balanced"), 99),
+        )
+
+    def resolve_model_id(
+        self, src: str, tgt: str, tier: str | None = None, local_only: bool = False
+    ) -> str:
         """Elige el mejor model_id para un par y tier opcional.
 
-        Si no se especifica tier, prefiere 'fast' (menor latencia).
+        Si no se especifica tier, prefiere 'fast' (menor latencia). Con ``local_only`` solo
+        considera modelos descargados por completo: si ninguno cubre el par, falla indicando
+        qué modelo del catálogo habría que descargar.
         """
-        candidates = self.get_models_for_pair(src, tgt, tier)
+        what = f"{src}→{tgt}" + (f" con tier='{tier}'" if tier else "")
+        defined = self.get_models_for_pair(src, tgt, tier)
+        if not defined:
+            raise ModelNotAvailableError(f"No hay modelos definidos para {what}")
+        candidates = self._by_preference(
+            [m for m in defined if not local_only or self.is_model_downloaded(m)]
+        )
         if not candidates:
+            suggestion = self._by_preference(defined)[0]
             raise ModelNotAvailableError(
-                f"No hay modelos definidos para {src}→{tgt}"
-                + (f" con tier='{tier}'" if tier else "")
-            )
-        if not tier:
-            candidates.sort(
-                key=lambda mid: TIER_PREFERENCE.get(self._catalog[mid].get("tier", "balanced"), 99)
+                f"Ningún modelo local cubre {what}. Descarga uno con el CLI: "
+                f"python -m app.core.model_manager download {suggestion}"
             )
         return candidates[0]
 
@@ -182,9 +208,22 @@ class ModelManager:
         info = self.get_model_info(model_id)
         return self._models_dir / info["hf_name"].replace("/", "__")
 
+    @staticmethod
+    def _has_weights(path: Path) -> bool:
+        return any(path.glob("*.safetensors")) or any(path.glob("pytorch_model*.bin"))
+
     def is_model_downloaded(self, model_id: str) -> bool:
-        """True solo si la descarga terminó (existe el marcador), no si hay archivos sueltos."""
-        return (self._get_local_path(model_id) / COMPLETE_MARKER).is_file()
+        """True solo si la descarga terminó (marcador) y los archivos siguen ahí.
+
+        Comprueba marcador + config.json + pesos, así que un modelo al que se le borró
+        algo a mano tampoco cuenta como disponible.
+        """
+        path = self._get_local_path(model_id)
+        return (
+            (path / COMPLETE_MARKER).is_file()
+            and (path / "config.json").is_file()
+            and self._has_weights(path)
+        )
 
     def get_download_state(self, model_id: str) -> str:
         """'ok' | 'incomplete' (hay archivos pero sin marcador) | 'missing'."""
@@ -217,11 +256,21 @@ class ModelManager:
             print(f"♻️  Descarga previa incompleta o sin verificar: se reanuda/valida '{model_id}'.")
 
         print(f"⬇️ Descargando '{hf_name}' en {local_path} (solo pesos PyTorch)...")
+        # Los archivos van DIRECTAMENTE a local_path. Por si alguna versión de huggingface_hub
+        # necesitara una caché temporal, se redirige a models/.hf_tmp (y se borra al terminar)
+        # para no tocar nunca ~/.cache/huggingface.
+        tmp_cache = self._models_dir / ".hf_tmp"
+        os.environ.setdefault("HF_XET_CACHE", str(tmp_cache / "xet"))
         try:
             local_path.mkdir(parents=True, exist_ok=True)
             marker.unlink(missing_ok=True)
             ignore = _ignore_patterns(HfApi().list_repo_files(hf_name))
-            snapshot_download(repo_id=hf_name, local_dir=str(local_path), ignore_patterns=ignore)
+            snapshot_download(
+                repo_id=hf_name,
+                local_dir=str(local_path),
+                cache_dir=str(tmp_cache / "hub"),
+                ignore_patterns=ignore,
+            )
             self._verify_download(local_path, model_id)
             marker.write_text(
                 json.dumps(
@@ -233,16 +282,15 @@ class ModelManager:
             raise
         except Exception as exc:
             raise ModelLoadError(f"Error al descargar '{model_id}': {exc}") from exc
+        finally:
+            shutil.rmtree(tmp_cache, ignore_errors=True)
         print(f"✅ '{model_id}' descargado correctamente en {local_path}")
 
-    @staticmethod
-    def _verify_download(local_path: Path, model_id: str) -> None:
+    @classmethod
+    def _verify_download(cls, local_path: Path, model_id: str) -> None:
         if not (local_path / "config.json").exists():
             raise ModelLoadError(f"Descarga incompleta de '{model_id}': falta config.json.")
-        has_weights = any(local_path.glob("*.safetensors")) or any(
-            local_path.glob("pytorch_model*.bin")
-        )
-        if not has_weights:
+        if not cls._has_weights(local_path):
             raise ModelLoadError(f"Descarga incompleta de '{model_id}': no se encontraron pesos.")
 
     def download_all(self, force: bool = False) -> int:

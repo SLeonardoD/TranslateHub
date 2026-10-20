@@ -31,7 +31,8 @@ def translate_texts(
             raise InvalidRequestError(
                 "Debes indicar 'model_id' o bien 'source_lang' y 'target_lang'."
             )
-        model_id = model_manager.resolve_model_id(source_lang, target_lang, tier)
+        # La API solo "ve" los modelos descargados por completo.
+        model_id = model_manager.resolve_model_id(source_lang, target_lang, tier, local_only=True)
 
     info = model_manager.get_model_info(model_id)
 
@@ -93,12 +94,12 @@ def get_models_status() -> list[dict]:
             "downloaded": model_manager.is_model_downloaded(m["model_id"]),
             "loaded": m["model_id"] in loaded,
         }
-        for m in model_manager.list_models()
+        for m in model_manager.list_models(local_only=True)
     ]
 
 
 def get_pairs() -> list[dict]:
-    return model_manager.list_pairs()
+    return model_manager.list_pairs(local_only=True)
 
 
 def get_loaded_model_ids() -> list[str]:

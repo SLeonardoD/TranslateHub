@@ -61,6 +61,10 @@ class Settings:
     api_key: str | None = None  # si se define, se exige la cabecera X-API-Key
     cors_origins: tuple[str, ...] = ()  # orígenes permitidos para navegadores
     log_level: str = "INFO"
+    log_file: str = "translator.log"  # relativo a la raíz del proyecto; "off" lo desactiva
+    log_max_mb: int = 10  # tamaño máximo antes de rotar el archivo
+    log_backups: int = 5  # archivos rotados que se conservan (translator.log.1 ...)
+    log_text_preview: int = 0  # caracteres del texto a registrar (0 = nunca se registra el texto)
 
     @classmethod
     def from_env(cls) -> Self:
@@ -87,7 +91,18 @@ class Settings:
             api_key=_env("API_KEY"),
             cors_origins=origins,
             log_level=(_env("LOG_LEVEL") or cls.log_level).upper(),
+            log_file=_env("LOG_FILE") or cls.log_file,
+            log_max_mb=_env_int("LOG_MAX_MB", cls.log_max_mb),
+            log_backups=_env_int("LOG_BACKUPS", cls.log_backups, minimum=0),
+            log_text_preview=_env_int("LOG_TEXT_PREVIEW", cls.log_text_preview, minimum=0),
         )
+
+    def resolve_log_file(self) -> Path | None:
+        """Ruta absoluta del archivo de log, o None si está desactivado."""
+        if self.log_file.lower() in {"off", "none", "false", "0"}:
+            return None
+        path = Path(self.log_file)
+        return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 settings = Settings.from_env()

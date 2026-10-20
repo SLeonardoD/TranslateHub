@@ -70,6 +70,7 @@ def mark_downloaded(manager: ModelManager, model_id: str) -> None:
     path = manager._get_local_path(model_id)
     path.mkdir(parents=True, exist_ok=True)
     (path / "config.json").write_text("{}", encoding="utf-8")
+    (path / "model.safetensors").write_bytes(b"0")
     (path / COMPLETE_MARKER).write_text("{}", encoding="utf-8")
 
 
