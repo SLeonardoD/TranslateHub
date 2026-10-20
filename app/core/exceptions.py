@@ -1,9 +1,32 @@
-"""Excepciones personalizadas del dominio de traducción."""
+"""Excepciones del dominio de traducción.
+
+Cada excepción se traduce a un código HTTP concreto en ``app/main.py``.
+"""
 
 
-class ModelNotAvailableError(Exception):
-    """El modelo no está definido en el catálogo, no está descargado o no cubre el par."""
+class TranslationError(Exception):
+    """Base de todas las excepciones del dominio."""
 
 
-class ModelLoadError(Exception):
-    """Error al cargar el modelo en memoria o al ejecutar la inferencia."""
+class CatalogError(TranslationError):
+    """El catálogo ``model_info.json`` no existe o es inválido."""
+
+
+class ModelNotAvailableError(TranslationError):
+    """Modelo no definido, no descargado, o que no cubre el par pedido (HTTP 404)."""
+
+
+class InvalidRequestError(TranslationError):
+    """Petición incoherente: faltan idiomas, idioma no soportado... (HTTP 422)."""
+
+
+class ModelLoadError(TranslationError):
+    """Fallo al descargar o cargar un modelo en memoria (HTTP 500)."""
+
+
+class InferenceError(TranslationError):
+    """Fallo durante la inferencia: falta de memoria, tensores inválidos... (HTTP 500)."""
+
+
+class ServerBusyError(TranslationError):
+    """La cola de peticiones está llena (HTTP 503)."""
