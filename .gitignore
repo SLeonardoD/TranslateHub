@@ -1,13 +1,26 @@
+# Modelos descargados (pesan GB)
+models/
+
+# Configuración local (el .env.example sí se versiona)
+.env
+
+# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 venv/
-.env
-models/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-coverage.xml
+.coverage
 htmlcov/
-translator.log
+
+# Editores / SO
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Log de la API
+*.log
+*.log.*

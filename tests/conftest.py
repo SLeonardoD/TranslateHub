@@ -2,13 +2,16 @@
 
 import copy
 import json
+import os
 import time
 from pathlib import Path
 
 import pytest
 
-from app.config import PROJECT_ROOT, parse_catalog
-from app.core.model_manager import COMPLETE_MARKER, LoadedModel, ModelManager
+os.environ["TRANSLATOR_ENV_FILE"] = "off"  # los tests no leen el .env del desarrollador
+
+from app.config import PROJECT_ROOT, parse_catalog  # noqa: E402
+from app.core.model_manager import COMPLETE_MARKER, LoadedModel, ModelManager  # noqa: E402
 
 RAW_CATALOG = json.loads((PROJECT_ROOT / "model_info.json").read_text(encoding="utf-8"))
 

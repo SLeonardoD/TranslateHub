@@ -23,7 +23,7 @@ from app.core.exceptions import (
     ServerBusyError,
     TranslationError,
 )
-from app.logging_setup import clean, request_id_var, setup_logging
+from app.logging_setup import clean, request_id_var, setup_logging, silence_known_warnings
 from app.models.schemas import (
     BatchTranslationRequest,
     BatchTranslationResponse,
@@ -42,6 +42,7 @@ from app.services.translation import (
 )
 
 setup_logging(settings.log_level)
+silence_known_warnings()
 logger = logging.getLogger("translator.api")
 access_logger = logging.getLogger("translator.access")
 

@@ -29,6 +29,26 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class _KnownWarningFilter(logging.Filter):
+    """Descarta una alerta concreta y conocida de transformers (el resto pasa intacto)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not ("`max_new_tokens`" in message and "will take precedence" in message)
+
+
+def silence_known_warnings() -> None:
+    """Silencia «Both `max_new_tokens` and `max_length` seem to have been set».
+
+    Es inofensiva: el modelo trae ``max_length=512`` en su generation_config y la API pasa
+    ``max_new_tokens``, que es el que debe mandar. Solo se filtra ese mensaje.
+    """
+    for name in ("transformers.generation.utils", "transformers.generation.configuration_utils"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, _KnownWarningFilter) for f in logger.filters):
+            logger.addFilter(_KnownWarningFilter())
+
+
 def clean(value: object, limit: int = 120) -> str:
     """Valor seguro para una línea de log.
 

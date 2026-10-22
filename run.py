@@ -14,7 +14,7 @@ import psutil  # noqa: E402
 import uvicorn  # noqa: E402
 
 try:
-    from app.config import load_catalog, settings  # noqa: E402
+    from app.config import ENV_FILE_LOADED, load_catalog, settings  # noqa: E402
     from app.core.exceptions import CatalogError  # noqa: E402
     from app.logging_setup import build_log_config  # noqa: E402
 except ValueError as exc:  # variable de entorno TRANSLATOR_* inválida
@@ -127,6 +127,9 @@ if __name__ == "__main__":
     else:
         print(f"   🔒 Escuchando solo en {settings.host} (no accesible desde otros equipos).")
 
+    print(f"   ⚙️  Config: {ENV_FILE_LOADED or 'sin .env (valores por defecto / entorno)'}")
+    if settings.max_batch_items == 0:
+        print("   ♾️  Lotes sin límite de textos (TRANSLATOR_MAX_BATCH_ITEMS=0).")
     print(f"   📦 Modelos en el catálogo: {len(catalog)}")
     if settings.api_key:
         print("   🔑 API key activada (cabecera X-API-Key).")

@@ -295,3 +295,30 @@ def test_api_key_required_when_configured(manager, monkeypatch):
 
 def test_no_api_key_means_open(client):
     assert client.get("/models").status_code == 200
+
+
+def test_batch_without_limits_when_max_batch_items_is_zero(monkeypatch):
+    """max_batch_items=0 → ni límite de textos ni de caracteres totales (el de cada texto sigue)."""
+    import importlib
+
+    import app.config as config
+    import app.models.schemas as schemas
+
+    monkeypatch.setattr(
+        config, "settings", replace(config.settings, max_batch_items=0, max_batch_chars=10)
+    )
+    importlib.reload(schemas)  # el límite de la lista se evalúa al importar
+    try:
+        req = schemas.BatchTranslationRequest(
+            texts=["palabra larga"] * 500, source_lang="es", target_lang="en"
+        )
+        assert len(req.texts) == 500
+        with pytest.raises(ValueError):  # el límite por texto sigue activo
+            schemas.BatchTranslationRequest(
+                texts=["x" * (config.settings.max_text_chars + 1)],
+                source_lang="es",
+                target_lang="en",
+            )
+    finally:
+        monkeypatch.undo()
+        importlib.reload(schemas)

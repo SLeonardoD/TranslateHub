@@ -96,3 +96,66 @@ def test_settings_reject_bad_values(monkeypatch, name, value):
     monkeypatch.setenv(f"TRANSLATOR_{name}", value)
     with pytest.raises(ValueError, match=name):
         Settings.from_env()
+
+
+# ---------- .env y lotes ilimitados ----------
+
+
+def test_parse_dotenv_formats():
+    from app.config import parse_dotenv
+
+    text = (
+        "\ufeff# comentario\nTRANSLATOR_PORT=9966  # puerto\n"
+        "export TRANSLATOR_HOST=\"127.0.0.1\"\nTRANSLATOR_API_KEY='a#b'\nmalo\n1X=2\n\n"
+    )
+    assert parse_dotenv(text) == {
+        "TRANSLATOR_PORT": "9966",
+        "TRANSLATOR_HOST": "127.0.0.1",
+        "TRANSLATOR_API_KEY": "a#b",
+    }
+
+
+def test_dotenv_does_not_override_real_environment(tmp_path, monkeypatch):
+    from app.config import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text("TRANSLATOR_PORT=9966\nTRANSLATOR_MAX_BATCH_ITEMS=0\n", encoding="utf-8")
+    monkeypatch.setenv("TRANSLATOR_PORT", "7000")
+    monkeypatch.delenv("TRANSLATOR_MAX_BATCH_ITEMS", raising=False)
+    assert load_dotenv(env) == env
+    s = Settings.from_env()
+    assert s.port == 7000  # el entorno real manda
+    assert s.max_batch_items == 0  # viene del .env
+    monkeypatch.delenv("TRANSLATOR_MAX_BATCH_ITEMS")
+
+
+def test_load_dotenv_missing_file(tmp_path):
+    from app.config import load_dotenv
+
+    assert load_dotenv(tmp_path / "nope.env") is None
+
+
+def test_max_batch_items_zero_is_valid_negative_is_not(monkeypatch):
+    monkeypatch.setenv("TRANSLATOR_MAX_BATCH_ITEMS", "0")
+    assert Settings.from_env().max_batch_items == 0
+    monkeypatch.setenv("TRANSLATOR_MAX_BATCH_ITEMS", "-1")
+    with pytest.raises(ValueError):
+        Settings.from_env()
+
+
+def test_known_transformers_warning_is_filtered():
+    import logging
+
+    from app.logging_setup import _KnownWarningFilter
+
+    f = _KnownWarningFilter()
+
+    def rec(msg):
+        return logging.LogRecord("x", logging.WARNING, "f", 1, msg, None, None)
+
+    assert not f.filter(
+        rec(
+            "Both `max_new_tokens` (=512) and `max_length`(=512) ... `max_new_tokens` will take precedence."
+        )
+    )
+    assert f.filter(rec("otra alerta cualquiera"))

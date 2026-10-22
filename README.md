@@ -141,6 +141,12 @@ Apunta la URL de **Red local**: es la que usarán tus otras aplicaciones. Si el 
 
 Todas son opcionales. Se leen al arrancar.
 
+### Archivo `.env`
+
+Copia `.env.example` como `.env` (junto a `run.py`) y cambia solo lo que necesites; así no hace falta tocar variables del sistema. Orden de prioridad: **variable de entorno real > `.env` > valor por defecto**. Reinicia el servidor tras editarlo. `.env` está en `.gitignore` (puede contener la API key); `.env.example` sí se versiona.
+
+> Con `TRANSLATOR_MAX_BATCH_ITEMS=0` un lote no tiene tope de textos. Un capítulo largo tarda en traducirse en una PC modesta: sube el timeout del cliente y `TRANSLATOR_MAX_PENDING_REQUESTS` si varias peticiones esperan en cola.
+
 | Variable | Por defecto | Descripción |
 |---|---|---|
 | `TRANSLATOR_HOST` | `0.0.0.0` | Interfaz de escucha. Usa `127.0.0.1` para aceptar solo conexiones locales. |
@@ -152,8 +158,9 @@ Todas son opcionales. Se leen al arrancar.
 | `TRANSLATOR_CHUNK_TARGET_TOKENS` | `200` | Tamaño objetivo de cada fragmento al trocear textos largos (mínimo 16). |
 | `TRANSLATOR_BATCH_SIZE` | `8` | Fragmentos traducidos a la vez. Bájalo si te quedas sin RAM. |
 | `TRANSLATOR_MAX_TEXT_CHARS` | `20000` | Caracteres máximos por texto. |
-| `TRANSLATOR_MAX_BATCH_ITEMS` | `32` | Textos máximos en `/translate/batch`. |
-| `TRANSLATOR_MAX_BATCH_CHARS` | `100000` | Caracteres totales máximos en `/translate/batch`. |
+| `TRANSLATOR_MAX_BATCH_ITEMS` | `32` | Textos máximos en `/translate/batch`. **`0` = sin límite** (permite encolar capítulos completos). |
+| `TRANSLATOR_MAX_BATCH_CHARS` | `100000` | Caracteres totales máximos en `/translate/batch`. **Se ignora si `MAX_BATCH_ITEMS=0`.** El límite por texto (`MAX_TEXT_CHARS`) siempre se aplica. |
+| `TRANSLATOR_ENV_FILE` | `.env` | Ruta alternativa del archivo de configuración (`off` lo desactiva). |
 | `TRANSLATOR_API_KEY` | — | Si se define, `/models`, `/pairs` y `/translate*` exigen la cabecera `X-API-Key`. |
 | `TRANSLATOR_CORS_ORIGINS` | — | Orígenes permitidos para navegadores, separados por comas. |
 | `TRANSLATOR_MODELS_DIR` | `./models` | Carpeta de los modelos descargados. |

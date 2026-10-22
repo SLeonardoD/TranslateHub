@@ -13,6 +13,61 @@ from app.core.exceptions import CatalogError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+# ---------------------------------------------------------------------------
+# Archivo .env (sin dependencias externas)
+# ---------------------------------------------------------------------------
+
+
+def parse_dotenv(text: str) -> dict[str, str]:
+    """Interpreta el contenido de un .env: ``CLAVE=valor``, comentarios con ``#``,
+    comillas simples o dobles y prefijo opcional ``export``. Las líneas inválidas se ignoran."""
+    values: dict[str, str] = {}
+    for line in text.lstrip("\ufeff").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        raw = raw.strip()
+        if raw[:1] in {'"', "'"}:
+            end = raw.find(raw[0], 1)
+            value = raw[1:end] if end != -1 else raw[1:]
+        else:
+            value = re.split(r"\s+#", raw, maxsplit=1)[0].strip()
+        values[key] = value
+    return values
+
+
+def load_dotenv(path: Path | None = None) -> Path | None:
+    """Carga el .env en ``os.environ`` sin pisar variables que ya estén definidas.
+
+    Precedencia: variable de entorno real > .env > valor por defecto.
+    ``TRANSLATOR_ENV_FILE`` cambia la ruta del archivo (``off`` lo desactiva).
+    Devuelve la ruta cargada, o None si no hay archivo.
+    """
+    if path is None:
+        custom = (os.environ.get("TRANSLATOR_ENV_FILE") or "").strip()
+        if custom.lower() in {"off", "none", "false", "0"}:
+            return None
+        path = Path(custom) if custom else PROJECT_ROOT / ".env"
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+    if not path.is_file():
+        return None
+    try:
+        values = parse_dotenv(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"No se pudo leer {path}: {exc}") from exc
+    for key, value in values.items():
+        os.environ.setdefault(key, value)
+    return path
+
+
+ENV_FILE_LOADED = load_dotenv()  # antes de leer cualquier TRANSLATOR_*
+
 # La carpeta se crea al descargar un modelo, no al importar el módulo.
 MODELS_BASE_DIR = Path(os.environ.get("TRANSLATOR_MODELS_DIR") or PROJECT_ROOT / "models")
 
@@ -48,15 +103,15 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 @dataclass(frozen=True)
 class Settings:
     host: str = "0.0.0.0"
-    port: int = 9966
+    port: int = 8000
     device: str = "auto"  # auto | cpu | cuda
     max_loaded_models: int = 1  # modelos simultáneos en RAM (LRU)
     max_pending_requests: int = 16  # peticiones en curso + en cola
     chunk_target_tokens: int = 200  # tamaño objetivo de cada fragmento de texto
     batch_size: int = 8  # fragmentos por llamada a generate()
     max_text_chars: int = 20_000  # caracteres máximos por texto
-    max_batch_items: int = 32  # textos máximos por petición batch
-    max_batch_chars: int = 100_000  # caracteres máximos por petición batch
+    max_batch_items: int = 32  # textos máximos por petición batch (0 = sin límite)
+    max_batch_chars: int = 100_000  # caracteres máximos por batch (se ignora si items = 0)
     preload_model: str | None = None  # model_id a cargar al arrancar
     api_key: str | None = None  # si se define, se exige la cabecera X-API-Key
     cors_origins: tuple[str, ...] = ()  # orígenes permitidos para navegadores
@@ -85,7 +140,7 @@ class Settings:
             ),
             batch_size=_env_int("BATCH_SIZE", cls.batch_size),
             max_text_chars=_env_int("MAX_TEXT_CHARS", cls.max_text_chars),
-            max_batch_items=_env_int("MAX_BATCH_ITEMS", cls.max_batch_items),
+            max_batch_items=_env_int("MAX_BATCH_ITEMS", cls.max_batch_items, minimum=0),
             max_batch_chars=_env_int("MAX_BATCH_CHARS", cls.max_batch_chars),
             preload_model=_env("PRELOAD_MODEL"),
             api_key=_env("API_KEY"),
