@@ -103,7 +103,7 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
 @dataclass(frozen=True)
 class Settings:
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 9500
     device: str = "auto"  # auto | cpu | cuda
     max_loaded_models: int = 1  # modelos simultáneos en RAM (LRU)
     max_pending_requests: int = 16  # peticiones en curso + en cola
