@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 os.environ["TRANSLATOR_ENV_FILE"] = "off"  # los tests no leen el .env del desarrollador
+# TestClient usa «Host: testserver»: se simula el modo LAN para que la guarda de Host no actúe.
+os.environ["TRANSLATOR_HOST"] = "lan"
 
 from app.config import PROJECT_ROOT, parse_catalog  # noqa: E402
 from app.core.model_manager import COMPLETE_MARKER, LoadedModel, ModelManager  # noqa: E402

@@ -27,7 +27,10 @@ def post_translate(client, **body):
 def test_root(client):
     body = client.get("/").json()
     assert body["status"] == "ok"
-    assert body["queue"] == {"pending": 0, "max": main.settings.max_pending_requests}
+    assert body["queue"]["pending"] == 0
+    assert body["queue"]["max"] == main.settings.max_pending_requests
+    assert body["queue"]["pending_chars"] == 0
+    assert "estimated_wait_s" in body["queue"]
 
 
 def test_models_and_pairs(client, manager):
@@ -191,7 +194,9 @@ def test_500_inference_error(client, manager, monkeypatch):
     monkeypatch.setattr(manager, "translate_batch", boom)
     r = post_translate(client, text="x", source_lang="en", target_lang="es")
     assert r.status_code == 500
-    assert "sin memoria" in r.json()["detail"]
+    body = r.json()
+    assert "sin memoria" not in r.text  # el detalle interno no sale del servidor
+    assert body["request_id"] == r.headers["x-request-id"]
 
 
 def test_500_load_error(client, manager, monkeypatch):
@@ -210,6 +215,8 @@ def test_unexpected_errors_are_500_with_json(manager, monkeypatch):
         r = post_translate(test_client, text="x", source_lang="en", target_lang="es")
     assert r.status_code == 500
     assert "Error interno" in r.json()["detail"]
+    assert "division" not in r.text and "ZeroDivisionError" not in r.text
+    assert r.json()["request_id"] == r.headers["x-request-id"]
 
 
 # ---------- Cola: el servidor sigue respondiendo ----------
@@ -322,3 +329,93 @@ def test_batch_without_limits_when_max_batch_items_is_zero(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(schemas)
+
+
+# ---------- Trabajos abandonados por el cliente ----------
+
+
+class _FakeRequest:
+    """Request mínimo: ``is_disconnected`` pasa a True a los ``after`` segundos."""
+
+    def __init__(self, queue, after: float | None):
+        import types
+
+        self.app = types.SimpleNamespace(state=types.SimpleNamespace(queue=queue))
+        self._t0 = time.monotonic()
+        self._after = after
+
+    async def is_disconnected(self) -> bool:
+        return self._after is not None and time.monotonic() - self._t0 >= self._after
+
+
+def test_abandoned_request_is_skipped_when_its_turn_comes():
+    import asyncio
+
+    from app.core.concurrency import RequestQueue, check_cancelled
+    from app.core.exceptions import ClientDisconnectedError
+
+    ran: list[str] = []
+
+    def work(name, cancel):
+        check_cancelled(cancel)
+        ran.append(name)
+        time.sleep(0.3)
+        return name
+
+    async def scenario():
+        queue = RequestQueue(max_pending=5)
+        alive = asyncio.create_task(
+            main._run_job(_FakeRequest(queue, None), {}, work, "vivo", chars=10)
+        )
+        await asyncio.sleep(0.02)
+        gone = asyncio.create_task(
+            main._run_job(_FakeRequest(queue, 0.0), {}, work, "ausente", chars=10)
+        )
+        results = await asyncio.gather(alive, gone, return_exceptions=True)
+        return results, queue.pending
+
+    (alive_result, gone_result), pending = asyncio.run(scenario())
+    assert alive_result == "vivo"
+    assert isinstance(gone_result, ClientDisconnectedError)
+    assert ran == ["vivo"]  # el ausente no llegó a ejecutarse
+    assert pending == 0
+
+
+def test_disconnect_mid_translation_stops_early():
+    import asyncio
+
+    from app.core.concurrency import RequestQueue, check_cancelled
+    from app.core.exceptions import ClientDisconnectedError
+
+    def work(cancel):
+        for _ in range(100):  # 5 s si nadie la corta
+            check_cancelled(cancel)
+            time.sleep(0.05)
+
+    async def scenario():
+        queue = RequestQueue(max_pending=5)
+        started = time.monotonic()
+        with pytest.raises(ClientDisconnectedError):
+            await main._run_job(_FakeRequest(queue, 0.3), {}, work, chars=10)
+        return time.monotonic() - started
+
+    assert asyncio.run(scenario()) < 2
+
+
+def test_503_reports_estimate_and_retry_after(manager, monkeypatch):
+    monkeypatch.setattr(translation, "model_manager", manager)
+    monkeypatch.setattr(main, "settings", replace(main.settings, max_pending_requests=1))
+    manager.delay = 0.4
+    body = {"text": "hola mundo", "source_lang": "en", "target_lang": "es"}
+    with TestClient(main.app) as c:
+        assert post_translate(c, **body).status_code == 200  # primera medición
+        thread = threading.Thread(target=post_translate, args=(c,), kwargs=body)
+        thread.start()
+        time.sleep(0.15)
+        r = post_translate(c, **body)
+        queue_info = c.get("/").json()["queue"]
+        thread.join()
+    assert r.status_code == 503
+    assert r.headers["retry-after"].isdigit() and int(r.headers["retry-after"]) >= 5
+    assert r.json()["estimated_wait_s"] >= 0
+    assert queue_info["pending"] == 1 and queue_info["pending_chars"] == len(body["text"])

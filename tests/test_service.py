@@ -82,3 +82,42 @@ def test_models_status_marks_loaded(manager):
     status = {m["model_id"]: m for m in translation.get_models_status()}
     assert status["opus-mt-en-es"]["loaded"] and status["opus-mt-en-es"]["downloaded"]
     assert not status["opus-mt-es-en"]["loaded"]
+
+
+# ---------- Cancelación (cliente desconectado) ----------
+
+
+def test_cancelled_before_start_never_loads_the_model(manager):
+    import threading
+
+    import pytest
+
+    from app.core.exceptions import ClientDisconnectedError
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(ClientDisconnectedError):
+        manager.translate_batch("opus-mt-en-es", ["hola"], cancel=cancel)
+    assert manager.loads == [] and manager.batches == []
+
+
+def test_cancelled_between_batches_stops_the_work(manager):
+    import threading
+
+    import pytest
+
+    from app.core.exceptions import ClientDisconnectedError
+
+    cancel = threading.Event()
+    original = manager._generate_batch
+
+    def generate_then_disconnect(*args, **kwargs):
+        result = original(*args, **kwargs)
+        cancel.set()  # el cliente se va durante el primer lote
+        return result
+
+    manager._generate_batch = generate_then_disconnect
+    texts = [f"texto numero {i}" for i in range(30)]  # varios lotes (batch_size = 8)
+    with pytest.raises(ClientDisconnectedError):
+        manager.translate_batch("opus-mt-en-es", texts, cancel=cancel)
+    assert len(manager.batches) == 1

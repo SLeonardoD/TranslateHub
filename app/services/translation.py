@@ -1,5 +1,8 @@
 """Servicio de traducción: resuelve modelos, valida la petición y coordina la inferencia."""
 
+import threading
+
+from app.core.concurrency import check_cancelled
 from app.core.exceptions import InvalidRequestError, ModelNotAvailableError
 from app.core.languages import normalize_lang
 from app.core.model_manager import ModelManager
@@ -14,11 +17,14 @@ def translate_texts(
     target_lang: str | None = None,
     tier: str | None = None,
     max_length: int | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict:
     """Resuelve el modelo (si hace falta), valida la combinación y traduce todos los textos.
 
     Devuelve los metadatos del modelo usado y una lista ``results`` (uno por texto).
+    ``cancel`` se activa si el cliente se desconecta: el trabajo se abandona.
     """
+    check_cancelled(cancel)  # un cliente ausente no debe ni cargar el modelo
     if not texts:
         raise InvalidRequestError("No hay textos que traducir.")
 
@@ -63,6 +69,7 @@ def translate_texts(
         source_lang=source_lang,
         target_lang=target_lang,
         max_length=max_length,
+        cancel=cancel,
     )
     return {
         "model_id": model_id,

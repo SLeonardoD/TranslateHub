@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import MODELS_BASE_DIR, TIER_PREFERENCE, load_catalog, settings
+from app.core.concurrency import check_cancelled
 from app.core.exceptions import (
     CatalogError,
     InferenceError,
@@ -396,17 +397,20 @@ class ModelManager:
         source_lang: str | None = None,
         target_lang: str | None = None,
         max_length: int | None = None,
+        cancel: threading.Event | None = None,
     ) -> list[ItemResult]:
         """Operación atómica: lock → asegurar modelo cargado → traducir todos los textos.
 
-        Otra petición (incluso de otro modelo) esperará a que termine.
+        Otra petición (incluso de otro modelo) esperará a que termine. Si ``cancel`` se activa
+        (el cliente se fue), se abandona antes de cargar el modelo o entre dos lotes.
         """
+        check_cancelled(cancel)
         with self._lock:
             loaded = self._ensure_model_loaded_locked(model_id)
             info = self.get_model_info(model_id)
             try:
                 return self._translate_locked(
-                    loaded, info, model_id, texts, source_lang, target_lang, max_length
+                    loaded, info, model_id, texts, source_lang, target_lang, max_length, cancel
                 )
             except TranslationError:
                 raise
@@ -426,6 +430,7 @@ class ModelManager:
         source_lang: str | None,
         target_lang: str | None,
         max_length: int | None,
+        cancel: threading.Event | None = None,
     ) -> list[ItemResult]:
         forced_bos_token_id = None
         if info.get("family") == "nllb":
@@ -443,6 +448,7 @@ class ModelManager:
             return self._count_tokens(loaded, list(batch))
 
         segmentations = [build_chunks(text, count, target) for text in texts]
+        check_cancelled(cancel)
 
         # Fragmentos de longitud parecida juntos => menos relleno (padding) en cada batch.
         order = sorted(
@@ -451,6 +457,7 @@ class ModelManager:
         )
         outputs: dict[tuple[int, int], tuple[str, bool]] = {}
         for k in range(0, len(order), settings.batch_size):
+            check_cancelled(cancel)  # entre lotes: la parte más lenta ya no se desperdicia
             keys = order[k : k + settings.batch_size]
             batch_texts = [segmentations[i].chunks[j].text for i, j in keys]
             results = self._generate_batch(

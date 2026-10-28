@@ -100,10 +100,27 @@ def _env_int(name: str, default: int, minimum: int = 1) -> int:
     return value
 
 
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_host(raw: str) -> str:
+    """Admite alias: ``local`` → solo este equipo, ``lan`` → toda la red local.
+
+    Cualquier otro valor se usa tal cual (p. ej. la IP concreta de tu tarjeta de red).
+    """
+    value = raw.strip()
+    alias = value.lower()
+    if alias in {"local", "localhost"}:
+        return "127.0.0.1"
+    if alias in {"lan", "red", "all"}:
+        return "0.0.0.0"
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
-    host: str = "0.0.0.0"
-    port: int = 9500
+    host: str = "127.0.0.1"  # por defecto solo este equipo; "lan" / 0.0.0.0 abre a la red
+    port: int = 8000
     device: str = "auto"  # auto | cpu | cuda
     max_loaded_models: int = 1  # modelos simultáneos en RAM (LRU)
     max_pending_requests: int = 16  # peticiones en curso + en cola
@@ -112,6 +129,7 @@ class Settings:
     max_text_chars: int = 20_000  # caracteres máximos por texto
     max_batch_items: int = 32  # textos máximos por petición batch (0 = sin límite)
     max_batch_chars: int = 100_000  # caracteres máximos por batch (se ignora si items = 0)
+    max_body_mb: int = 20  # tamaño máximo del cuerpo de una petición (HTTP 413 si se supera)
     preload_model: str | None = None  # model_id a cargar al arrancar
     api_key: str | None = None  # si se define, se exige la cabecera X-API-Key
     cors_origins: tuple[str, ...] = ()  # orígenes permitidos para navegadores
@@ -120,6 +138,16 @@ class Settings:
     log_max_mb: int = 10  # tamaño máximo antes de rotar el archivo
     log_backups: int = 5  # archivos rotados que se conservan (translator.log.1 ...)
     log_text_preview: int = 0  # caracteres del texto a registrar (0 = nunca se registra el texto)
+    console_log: str = "simple"  # simple = resumen por petición; full = igual que el archivo
+
+    @property
+    def local_only(self) -> bool:
+        """True si el servidor escucha solo en este equipo (loopback)."""
+        return self.host.lower() in _LOCAL_HOSTS or self.host.startswith("127.")
+
+    @property
+    def max_body_bytes(self) -> int:
+        return self.max_body_mb * 1024 * 1024
 
     @classmethod
     def from_env(cls) -> Self:
@@ -128,9 +156,14 @@ class Settings:
             raise ValueError(
                 f"TRANSLATOR_DEVICE debe ser auto, cpu o cuda (valor actual: {device!r})."
             )
+        console_log = (_env("CONSOLE_LOG") or cls.console_log).lower()
+        if console_log not in {"simple", "full"}:
+            raise ValueError(
+                f"TRANSLATOR_CONSOLE_LOG debe ser simple o full (valor actual: {console_log!r})."
+            )
         origins = tuple(o.strip() for o in (_env("CORS_ORIGINS") or "").split(",") if o.strip())
         return cls(
-            host=_env("HOST") or cls.host,
+            host=resolve_host(_env("HOST") or cls.host),
             port=_env_int("PORT", cls.port),
             device=device,
             max_loaded_models=_env_int("MAX_LOADED_MODELS", cls.max_loaded_models),
@@ -142,6 +175,7 @@ class Settings:
             max_text_chars=_env_int("MAX_TEXT_CHARS", cls.max_text_chars),
             max_batch_items=_env_int("MAX_BATCH_ITEMS", cls.max_batch_items, minimum=0),
             max_batch_chars=_env_int("MAX_BATCH_CHARS", cls.max_batch_chars),
+            max_body_mb=_env_int("MAX_BODY_MB", cls.max_body_mb),
             preload_model=_env("PRELOAD_MODEL"),
             api_key=_env("API_KEY"),
             cors_origins=origins,
@@ -150,6 +184,7 @@ class Settings:
             log_max_mb=_env_int("LOG_MAX_MB", cls.log_max_mb),
             log_backups=_env_int("LOG_BACKUPS", cls.log_backups, minimum=0),
             log_text_preview=_env_int("LOG_TEXT_PREVIEW", cls.log_text_preview, minimum=0),
+            console_log=console_log,
         )
 
     def resolve_log_file(self) -> Path | None:

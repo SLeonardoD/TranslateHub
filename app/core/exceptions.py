@@ -29,4 +29,19 @@ class InferenceError(TranslationError):
 
 
 class ServerBusyError(TranslationError):
-    """La cola de peticiones está llena (HTTP 503)."""
+    """La cola de peticiones está llena (HTTP 503).
+
+    ``retry_after`` (segundos) va en la cabecera ``Retry-After``; ``estimated_wait_s`` es lo que
+    tardaría en vaciarse la cola según el rendimiento medido (None si aún no hay datos).
+    """
+
+    def __init__(
+        self, message: str, *, retry_after: int = 5, estimated_wait_s: float | None = None
+    ) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.estimated_wait_s = estimated_wait_s
+
+
+class ClientDisconnectedError(TranslationError):
+    """El cliente cerró la conexión: se abandona el trabajo (HTTP 499, nadie leerá la respuesta)."""

@@ -80,7 +80,8 @@ class TranslationRequest(_ModelSelection):
 
 
 class BatchTranslationRequest(_ModelSelection):
-    texts: list[str] = Field(..., min_length=1, max_length=settings.max_batch_items)
+    # max_batch_items == 0 → sin límite de textos (y sin límite de caracteres totales).
+    texts: list[str] = Field(..., min_length=1, max_length=settings.max_batch_items or None)
 
     @field_validator("texts")
     @classmethod
@@ -91,7 +92,8 @@ class BatchTranslationRequest(_ModelSelection):
                 raise ValueError(
                     f"cada texto admite como máximo {settings.max_text_chars} caracteres"
                 )
-        if sum(len(t) for t in texts) > settings.max_batch_chars:
+        unlimited = settings.max_batch_items == 0
+        if not unlimited and sum(len(t) for t in texts) > settings.max_batch_chars:
             raise ValueError(
                 f"el lote admite como máximo {settings.max_batch_chars} caracteres en total"
             )

@@ -82,3 +82,70 @@ def test_pending_counter_is_released_on_error():
         return queue.pending
 
     assert asyncio.run(scenario()) == 0
+
+
+# ---------- Espera estimada ----------
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_no_estimate_without_history():
+    queue = RequestQueue(max_pending=2)
+    assert queue.estimated_wait_s() is None
+    assert queue.retry_after_s() == 5
+
+
+def test_estimate_uses_recent_speed_and_progress_of_the_running_job():
+    clock = _Clock()
+    queue = RequestQueue(max_pending=2, clock=clock)
+    queue._record(1.0, 100)  # 0,01 s por carácter
+    queue._pending_chars = 300  # incluye el trabajo en curso
+    queue._running_chars, queue._running_since = 100, clock() - 0.5  # lleva 50 caracteres
+    assert queue.estimated_wait_s() == pytest.approx(2.5)
+
+
+def test_retry_after_is_clamped():
+    clock = _Clock()
+    queue = RequestQueue(max_pending=1, clock=clock)
+    queue._record(1.0, 100)
+    queue._running_chars, queue._running_since = 100, clock()  # quedan ~1 s -> mínimo 5
+    assert queue.retry_after_s() == 5
+    queue._running_chars = 10_000  # ~100 s
+    assert queue.retry_after_s() == 100
+    queue._running_chars = 10_000_000  # tope
+    assert queue.retry_after_s() == 120
+
+
+def test_busy_error_carries_the_estimate():
+    async def scenario():
+        queue = RequestQueue(max_pending=1)
+        await queue.run(time.sleep, 0.05, chars=50)  # primera medición
+        first = asyncio.create_task(queue.run(time.sleep, 0.2, chars=100))
+        await asyncio.sleep(0.02)
+        with pytest.raises(ServerBusyError) as info:
+            await queue.run(time.sleep, 0, chars=1)
+        await first
+        return info.value
+
+    err = asyncio.run(scenario())
+    assert err.estimated_wait_s is not None and err.estimated_wait_s > 0
+    assert "Espera estimada" in str(err) and err.retry_after >= 5
+
+
+def test_failed_jobs_do_not_distort_the_speed():
+    def boom():
+        raise ValueError("x")
+
+    async def scenario():
+        queue = RequestQueue(max_pending=2)
+        with pytest.raises(ValueError):
+            await queue.run(boom, chars=1000)
+        return queue.estimated_wait_s(), queue.pending_chars
+
+    assert asyncio.run(scenario()) == (None, 0)

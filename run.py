@@ -5,6 +5,7 @@ import os
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+import argparse  # noqa: E402
 import ipaddress  # noqa: E402
 import re  # noqa: E402
 import socket  # noqa: E402
@@ -14,7 +15,8 @@ import psutil  # noqa: E402
 import uvicorn  # noqa: E402
 
 try:
-    from app.config import ENV_FILE_LOADED, load_catalog, settings  # noqa: E402
+    import app.config as config  # noqa: E402
+    from app.config import ENV_FILE_LOADED, Settings, load_catalog  # noqa: E402
     from app.core.exceptions import CatalogError  # noqa: E402
     from app.logging_setup import build_log_config  # noqa: E402
 except ValueError as exc:  # variable de entorno TRANSLATOR_* inválida
@@ -101,32 +103,78 @@ def get_lan_addresses(
     return sorted(found, key=lambda t: (t[0] != primary, t[1], ipaddress.ip_address(t[0])))
 
 
-if __name__ == "__main__":
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Servidor de traducción local. Por defecto solo escucha en este equipo."
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--local",
+        action="store_true",
+        help="solo este equipo (127.0.0.1). Es el modo por defecto.",
+    )
+    mode.add_argument(
+        "--lan",
+        action="store_true",
+        help="visible para otros equipos de la red local (0.0.0.0).",
+    )
+    return parser.parse_args(argv)
+
+
+def apply_mode_flag(args: argparse.Namespace) -> None:
+    """El flag manda sobre TRANSLATOR_HOST (entorno / .env). Debe ejecutarse antes de que
+    uvicorn importe ``app.main``, que es quien lee los ajustes."""
+    mode = "lan" if args.lan else "local" if args.local else None
+    if mode is not None:
+        os.environ["TRANSLATOR_HOST"] = mode
+        config.settings = Settings.from_env()
+
+
+def access_lines(host: str, port: int, lan: list[tuple[str, str]] | None = None) -> list[str]:
+    """Líneas del banner con las URLs de acceso según cómo escuche el servidor."""
+    lowered = host.lower()
+    if lowered in ("localhost", "::1") or host.startswith("127."):
+        return [
+            f"   📍 Localhost:  http://127.0.0.1:{port}",
+            "   🔒 Modo local: solo este equipo. Para abrirlo a la red: python run.py --lan",
+        ]
+    if host in ("0.0.0.0", "::"):
+        lines = [f"   📍 Localhost:  http://127.0.0.1:{port}"]
+        for i, (ip, iface) in enumerate(lan or []):
+            label = "Red local:" if i == 0 else "Otra red: "
+            lines.append(f"   🌐 {label} http://{ip}:{port}   ({iface})")
+        if lan:
+            lines.append(f"   📖 Docs:       http://{lan[0][0]}:{port}/docs")
+        else:
+            lines.append("   ⚠️  No se detectó ninguna IP de LAN.")
+        lines.append("   🌐 Modo LAN: visible para toda la red local (sin API key).")
+        return lines
+    # IP concreta (p. ej. la de la tarjeta de red de la LAN): solo se llega por esa IP.
+    return [
+        f"   🌐 Red local:  http://{host}:{port}",
+        f"   📖 Docs:       http://{host}:{port}/docs",
+        f"   🌐 Modo LAN: escuchando solo en {host}.",
+    ]
+
+
+def main(argv: list[str] | None = None) -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")  # consolas Windows sin UTF-8
+
+    apply_mode_flag(parse_args(argv))
+    settings = config.settings
 
     try:
         catalog = load_catalog()  # falla aquí, con un mensaje claro, si model_info.json es inválido
     except CatalogError as exc:
         sys.exit(f"❌ {exc}")
 
+    lan = get_lan_addresses() if settings.host in ("0.0.0.0", "::") else None
     print("=" * 60)
     print("🚀 Servidor de traducción iniciado")
-    print(f"   📍 Localhost:  http://127.0.0.1:{settings.port}")
-
-    if settings.host in ("0.0.0.0", "::"):
-        lan = get_lan_addresses()
-        for i, (ip, iface) in enumerate(lan):
-            label = "Red local:" if i == 0 else "Otra red: "
-            print(f"   🌐 {label} http://{ip}:{settings.port}   ({iface})")
-        if lan:
-            print(f"   📖 Docs:       http://{lan[0][0]}:{settings.port}/docs")
-        else:
-            print("   ⚠️  No se detectó ninguna IP de LAN.")
-    else:
-        print(f"   🔒 Escuchando solo en {settings.host} (no accesible desde otros equipos).")
-
+    for line in access_lines(settings.host, settings.port, lan):
+        print(line)
     print(f"   ⚙️  Config: {ENV_FILE_LOADED or 'sin .env (valores por defecto / entorno)'}")
     if settings.max_batch_items == 0:
         print("   ♾️  Lotes sin límite de textos (TRANSLATOR_MAX_BATCH_ITEMS=0).")
@@ -137,15 +185,25 @@ if __name__ == "__main__":
     print(f"   📝 Log: {log_file if log_file else 'desactivado'}")
     print("=" * 60)
 
-    # Consola + archivo (se escribe en vivo). El access log de uvicorn se sustituye por el
-    # de la aplicación (translator.access), que añade quién llama y para qué.
+    # Consola resumida + archivo con todo (se escribe en vivo). El access log de uvicorn se
+    # sustituye por el de la aplicación (translator.access), que añade quién llama y para qué.
+    # workers=1: la cola y el modelo viven en un solo proceso; con varios se romperían.
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
         reload=False,
+        workers=1,
         access_log=False,
         log_config=build_log_config(
-            settings.log_level, log_file, settings.log_max_mb, settings.log_backups
+            settings.log_level,
+            log_file,
+            settings.log_max_mb,
+            settings.log_backups,
+            settings.console_log,
         ),
     )
+
+
+if __name__ == "__main__":
+    main()

@@ -29,6 +29,40 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+class ConsoleFilter(logging.Filter):
+    """Oculta de la consola los registros marcados con ``extra={"console": False}``.
+
+    Siguen yendo al archivo, que lo guarda todo.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return getattr(record, "console", True) is not False
+
+
+class ConsoleFormatter(logging.Formatter):
+    """Formato corto para la consola: ``HH:MM:SS NIVEL mensaje``.
+
+    Si el registro trae ``extra={"console_msg": "..."}`` se muestra ese resumen en lugar del
+    mensaje completo (el archivo conserva el completo). El id de petición solo se añade en
+    avisos y errores, para buscarlos luego en el log.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(datefmt="%H:%M:%S")
+
+    def format(self, record: logging.LogRecord) -> str:
+        summary = getattr(record, "console_msg", None)
+        text = summary if isinstance(summary, str) else record.getMessage()
+        prefix = f"{self.formatTime(record, self.datefmt)} {record.levelname:<7}"
+        request_id = getattr(record, "request_id", "-")
+        if record.levelno >= logging.WARNING and request_id != "-":
+            prefix += f" [{request_id}]"
+        out = f"{prefix} {text}"
+        if record.exc_info:
+            out += "\n" + self.formatException(record.exc_info)
+        return out
+
+
 class _KnownWarningFilter(logging.Filter):
     """Descarta una alerta concreta y conocida de transformers (el resto pasa intacto)."""
 
@@ -75,18 +109,32 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def build_log_config(
-    level: str, log_file: Path | None, max_mb: int = 10, backups: int = 5
+    level: str,
+    log_file: Path | None,
+    max_mb: int = 10,
+    backups: int = 5,
+    console: str = "simple",
 ) -> dict[str, Any]:
-    """Configuración para ``uvicorn.run(log_config=...)``: consola + archivo rotativo."""
+    """Configuración para ``uvicorn.run(log_config=...)``: consola + archivo rotativo.
+
+    ``console="simple"``: la consola muestra un resumen por petición y oculta el ruido
+    (health-checks, detalles del cliente). ``"full"``: igual que el archivo.
+    El archivo siempre lleva todo el detalle.
+    """
     from uvicorn.config import LOGGING_CONFIG  # solo hace falta al arrancar con run.py
 
     config = copy.deepcopy(LOGGING_CONFIG)
-    config["filters"] = {"request_id": {"()": "app.logging_setup.RequestIdFilter"}}
+    simple = console == "simple"
+    config["filters"] = {
+        "request_id": {"()": "app.logging_setup.RequestIdFilter"},
+        "console": {"()": "app.logging_setup.ConsoleFilter"},
+    }
     config["formatters"]["app"] = {"format": LOG_FORMAT, "datefmt": DATE_FORMAT}
+    config["formatters"]["console"] = {"()": "app.logging_setup.ConsoleFormatter"}
     config["handlers"]["app_console"] = {
         "class": "logging.StreamHandler",
-        "formatter": "app",
-        "filters": ["request_id"],
+        "formatter": "console" if simple else "app",
+        "filters": ["request_id", "console"] if simple else ["request_id"],
         "stream": "ext://sys.stderr",
     }
     handlers = ["app_console"]

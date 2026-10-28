@@ -6,14 +6,15 @@ API HTTP local para servir capacidades de traducción usando modelos de Hugging 
 
 - **Carga perezosa**: ningún modelo se carga en RAM hasta la primera petición (o al arrancar, con `TRANSLATOR_PRELOAD_MODEL`).
 - **Un modelo en memoria por defecto**: se libera el anterior antes de cargar otro. Si te sobra RAM, `TRANSLATOR_MAX_LOADED_MODELS` conserva los últimos usados (LRU).
-- **Cola FIFO**: las traducciones se atienden **de una en una, en orden de llegada**, sin bloquear el servidor: `/`, `/models` y `/pairs` responden siempre, incluso con una traducción en curso. Si la cola se llena, responde `503`.
+- **Cola FIFO**: las traducciones se atienden **de una en una, en orden de llegada**, sin bloquear el servidor: `/`, `/models` y `/pairs` responden siempre, incluso con una traducción en curso. Si la cola se llena, responde `503` con una **espera estimada**; si el cliente se desconecta, el trabajo se **abandona**.
 - **Textos largos sin pérdidas**: se trocean por oraciones, se traducen por lotes y se reensamblan conservando saltos de línea. Nada se corta en silencio; si algo puede estar incompleto, la respuesta lo indica (`truncated`, `warnings`).
 - **Traducción por lotes**: `POST /translate/batch` traduce varios textos en una sola petición.
 - **Catálogo flexible y validado**: varios modelos por par de idiomas (rápido, equilibrado, alta calidad). Si `model_info.json` tiene un error, el servidor se niega a arrancar y dice exactamente cuál.
 - **Modelos multilingües**: soporte para NLLB con múltiples pares desde una sola descarga.
 - **Descarga controlada y verificada**: la API **nunca** descarga modelos; eso se hace desde el CLI. Un modelo solo cuenta como descargado cuando la descarga terminó (una descarga interrumpida ya no se confunde con una completa) y solo se bajan los pesos PyTorch necesarios.
 - **Selección flexible**: el cliente puede pedir un modelo explícito o dejar que el servidor resuelva según idioma y tier.
-- **Errores claros**: `404` (modelo/par no disponible), `422` (petición inválida), `503` (cola llena), `500` (fallo real de carga o inferencia).
+- **Errores claros**: `404` (modelo/par no disponible), `422` (petición inválida), `413` (cuerpo demasiado grande), `503` (cola llena), `500` (fallo real; mensaje genérico con un id para buscarlo en el log).
+- **Seguro por defecto**: arranca **solo en este equipo** (`127.0.0.1`); se abre a la red local únicamente con `--lan`.
 - **Solo modelos locales**: la API únicamente "ve" y usa modelos descargados por completo en `models/`. `/models` y `/pairs` solo muestran esos; pedir uno que no está (o está incompleto) da error `404` con el comando de descarga. En runtime **no hay ninguna vía para descargar**.
 - **Log de operaciones en vivo**: `translator.log` en la raíz registra cada petición (cuándo, quién, para qué, resultado) y todas las excepciones con su traceback. Ver [Log de operaciones](#-log-de-operaciones).
 - **Seguridad opcional**: API key por cabecera y CORS, desactivados por defecto.
@@ -27,12 +28,13 @@ API HTTP local para servir capacidades de traducción usando modelos de Hugging 
 mi_servidor_traduccion/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py              # Endpoints FastAPI, errores HTTP, API key y CORS
+│   ├── main.py              # Endpoints FastAPI, errores HTTP, access log, API key y CORS
+│   ├── http_guards.py       # Tope de cuerpo (413) y guarda de Host en modo local
 │   ├── config.py            # Ajustes (variables de entorno) y catálogo validado
 │   ├── logging_setup.py     # Logs: consola + archivo rotativo, id de petición
 │   ├── core/
 │   │   ├── __init__.py
-│   │   ├── concurrency.py   # Cola FIFO de traducciones
+│   │   ├── concurrency.py   # Cola FIFO, espera estimada y cancelación
 │   │   ├── exceptions.py    # Excepciones del dominio
 │   │   ├── languages.py     # Normalización de códigos de idioma
 │   │   ├── model_manager.py # Gestor de modelos + CLI
@@ -49,7 +51,8 @@ mi_servidor_traduccion/
 ├── pyproject.toml           # Configuración de ruff / pytest
 ├── requirements.txt         # Dependencias de producción
 ├── requirements-dev.txt     # Dependencias de desarrollo
-├── run.py                   # Arranque con detección de IP y log a archivo
+├── run.py                   # Arranque (--local / --lan), detección de IP y log a archivo
+├── .env.example             # Plantilla de configuración (copiar como .env)
 ├── translator.log           # Log de operaciones (se crea al arrancar con run.py)
 └── .gitignore
 ```
@@ -118,10 +121,16 @@ python -m app.core.model_manager download opus-mt-en-es --force
 ### 4. Arrancar el servidor
 
 ```bash
-python run.py
+python run.py          # modo local (por defecto): solo accesible desde este equipo
+python run.py --lan    # modo LAN: visible para otros equipos de la red local
 ```
 
-Salida esperada:
+| Modo | Escucha en | Cuándo usarlo |
+|---|---|---|
+| **local** (`--local`, por defecto) | `127.0.0.1` | La app que traduce corre en el mismo equipo. No se expone a la red. |
+| **LAN** (`--lan`) | `0.0.0.0` | Otros equipos de tu red usan el servidor. |
+
+El flag **manda** sobre `TRANSLATOR_HOST` (variable de entorno o `.env`), que también acepta `local`, `lan` o la IP concreta de tu tarjeta de red (así no escuchas en adaptadores virtuales o VPN). Salida esperada en modo LAN:
 
 ```text
 ============================================================
@@ -129,11 +138,16 @@ Salida esperada:
    📍 Localhost:  http://127.0.0.1:8000
    🌐 Red local: http://192.168.1.42:8000   (Wi-Fi)
    📖 Docs:       http://192.168.1.42:8000/docs
+   🌐 Modo LAN: visible para toda la red local (sin API key).
    📦 Modelos en el catálogo: 3
 ============================================================
 ```
 
-Apunta la URL de **Red local**: es la que usarán tus otras aplicaciones. Si el equipo tiene varias redes reales, se listan también como "Otra red", con la interfaz principal siempre primero. Los adaptadores virtuales (Docker, WSL, VirtualBox, VPN…) no se listan.
+En modo LAN apunta la URL de **Red local**: es la que usarán tus otras aplicaciones. Si el equipo tiene varias redes reales, se listan también como "Otra red", con la interfaz principal siempre primero. Los adaptadores virtuales (Docker, WSL, VirtualBox, VPN…) no se listan.
+
+> 🔒 En **modo local** el servidor solo acepta peticiones con `Host: localhost` o `127.0.0.1`. Así una página web abierta en tu navegador no puede usar un dominio propio apuntado a `127.0.0.1` (*DNS rebinding*) para hablar con él. Usa siempre `http://localhost:<puerto>` o `http://127.0.0.1:<puerto>`.
+>
+> ⚠️ **Un solo proceso.** La cola y el modelo viven dentro del proceso, por eso `run.py` fija `workers=1`. No lances `uvicorn --workers N`: rompería la cola de una en una y duplicaría la RAM.
 
 ---
 
@@ -149,7 +163,7 @@ Copia `.env.example` como `.env` (junto a `run.py`) y cambia solo lo que necesit
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
-| `TRANSLATOR_HOST` | `0.0.0.0` | Interfaz de escucha. Usa `127.0.0.1` para aceptar solo conexiones locales. |
+| `TRANSLATOR_HOST` | `127.0.0.1` | Interfaz de escucha: `local` (solo este equipo), `lan` (`0.0.0.0`, toda la red) o una IP concreta. El flag `--local` / `--lan` de `run.py` tiene prioridad. Si arrancas con `uvicorn` a mano y quieres LAN, define `TRANSLATOR_HOST=lan`. |
 | `TRANSLATOR_PORT` | `8000` | Puerto. |
 | `TRANSLATOR_PRELOAD_MODEL` | — | `model_id` a cargar al arrancar, para que la primera petición no espere. |
 | `TRANSLATOR_MAX_LOADED_MODELS` | `1` | Modelos simultáneos en RAM (se descarta el menos usado). OPUS-MT pesa ~300 MB; NLLB ~2,5 GB. |
@@ -161,10 +175,12 @@ Copia `.env.example` como `.env` (junto a `run.py`) y cambia solo lo que necesit
 | `TRANSLATOR_MAX_BATCH_ITEMS` | `32` | Textos máximos en `/translate/batch`. **`0` = sin límite** (permite encolar capítulos completos). |
 | `TRANSLATOR_MAX_BATCH_CHARS` | `100000` | Caracteres totales máximos en `/translate/batch`. **Se ignora si `MAX_BATCH_ITEMS=0`.** El límite por texto (`MAX_TEXT_CHARS`) siempre se aplica. |
 | `TRANSLATOR_ENV_FILE` | `.env` | Ruta alternativa del archivo de configuración (`off` lo desactiva). |
+| `TRANSLATOR_MAX_BODY_MB` | `20` | Tamaño máximo del cuerpo de una petición. Si se supera → `413` sin leerlo entero en memoria. Es el tope real cuando `MAX_BATCH_ITEMS=0`. |
 | `TRANSLATOR_API_KEY` | — | Si se define, `/models`, `/pairs` y `/translate*` exigen la cabecera `X-API-Key`. |
 | `TRANSLATOR_CORS_ORIGINS` | — | Orígenes permitidos para navegadores, separados por comas. |
 | `TRANSLATOR_MODELS_DIR` | `./models` | Carpeta de los modelos descargados. |
 | `TRANSLATOR_LOG_LEVEL` | `INFO` | Nivel de logs. |
+| `TRANSLATOR_CONSOLE_LOG` | `simple` | `simple`: la consola muestra un resumen por petición. `full`: lo mismo que el archivo. El **archivo** siempre lleva todo el detalle. |
 | `TRANSLATOR_LOG_FILE` | `translator.log` | Archivo de log (ruta relativa a la raíz del proyecto, o absoluta). `off` lo desactiva. |
 | `TRANSLATOR_LOG_MAX_MB` | `10` | Tamaño a partir del cual el log rota. |
 | `TRANSLATOR_LOG_BACKUPS` | `5` | Archivos rotados que se conservan (`translator.log.1`, `.2`…). |
@@ -219,9 +235,11 @@ Estado del servidor (siempre abierto, útil como health-check).
 {
   "status": "ok",
   "loaded_models": ["opus-mt-en-es"],
-  "queue": { "pending": 0, "max": 16 }
+  "queue": { "pending": 0, "max": 16, "pending_chars": 0, "estimated_wait_s": 0.0 }
 }
 ```
+
+`estimated_wait_s` es lo que tardaría en vaciarse la cola con el rendimiento medido en las últimas traducciones (`null` mientras no haya ninguna). `pending_chars` son los caracteres pendientes (el trabajo en curso incluido). Úsalo para decidir si enviar un capítulo ahora o esperar.
 
 ---
 
@@ -336,8 +354,11 @@ Si no indicas `model_id`, el servidor elige **entre los modelos locales** que cu
 | `401` | Falta o es incorrecta la API key (solo si `TRANSLATOR_API_KEY` está definida). |
 | `404` | Modelo no definido en el catálogo, no descargado en local (o descarga incompleta), ningún modelo local cubre el par, o par no soportado por el modelo. El mensaje indica el comando de descarga. |
 | `422` | Petición inválida: texto vacío o demasiado largo, falta `model_id` o par de idiomas, `tier`/`max_length` fuera de rango, idioma no soportado por el modelo, modelo multilingüe sin idiomas… |
-| `503` | Cola llena (`TRANSLATOR_MAX_PENDING_REQUESTS`). Incluye cabecera `Retry-After`. |
-| `500` | Fallo real al cargar el modelo en memoria o durante la inferencia (por ejemplo, falta de memoria). El traceback queda en la consola del servidor. |
+| `400` | Modo local: la cabecera `Host` no es `localhost` / `127.0.0.1`. |
+| `413` | El cuerpo supera `TRANSLATOR_MAX_BODY_MB` (20 MB por defecto). |
+| `499` | El cliente cerró la conexión y el trabajo se abandonó (solo aparece en el log: nadie recibe la respuesta). |
+| `503` | Cola llena (`TRANSLATOR_MAX_PENDING_REQUESTS`). Cuerpo `{"detail": ..., "estimated_wait_s": ...}` y cabecera `Retry-After` (segundos hasta que se libere un hueco, entre 5 y 120). |
+| `500` | Fallo real al cargar el modelo o durante la inferencia (por ejemplo, falta de memoria). Respuesta genérica `{"detail": "Error interno...", "request_id": "4f2a91c0"}`: el detalle y el traceback están **solo en el log**; busca ese id (también viene en la cabecera `X-Request-ID`). |
 
 ---
 
@@ -388,8 +409,9 @@ El servidor atiende las traducciones **de una en una, en orden de llegada**, pen
 
 - Mientras una traducción está en curso, las demás esperan su turno sin consumir CPU.
 - `GET /`, `/models` y `/pairs` **no esperan** a la cola: responden al instante.
-- Si hay `TRANSLATOR_MAX_PENDING_REQUESTS` peticiones pendientes (en curso + en cola), las nuevas reciben `503` con `Retry-After: 5`.
-- `GET /` muestra cuántas hay pendientes (`queue.pending`).
+- Si hay `TRANSLATOR_MAX_PENDING_REQUESTS` peticiones pendientes (en curso + en cola), las nuevas reciben `503` con la espera estimada y `Retry-After`.
+- `GET /` muestra cuántas hay pendientes (`queue.pending`), sus caracteres y la **espera estimada** (`queue.estimated_wait_s`), calculada con la velocidad de las últimas 50 traducciones.
+- **Si el cliente se desconecta** (por ejemplo, por *timeout*), su trabajo se abandona: si aún estaba esperando, se descarta al llegar su turno sin traducir nada; si ya se estaba traduciendo, se detiene al terminar el lote en curso. Así un reintento no deja detrás una traducción fantasma que bloquee la cola. Queda registrado como `499`.
 
 > ⏱️ Con cola, un cliente puede esperar mucho: usa un *timeout* generoso (120 s o más) o consulta `GET /` antes de enviar.
 
@@ -397,7 +419,16 @@ El servidor atiende las traducciones **de una en una, en orden de llegada**, pen
 
 ## 📝 Log de operaciones
 
-Al arrancar con `python run.py` se crea `translator.log` en la raíz del proyecto. Se escribe **en vivo** (cada línea se guarda al instante) y registra:
+Al arrancar con `python run.py` se crea `translator.log` en la raíz del proyecto. Se escribe **en vivo** (cada línea se guarda al instante) y registra **todo el detalle** (IP, `User-Agent`, `X-Client-Name`, tiempos de trabajo y de cola…). La **consola**, en cambio, es un resumen (`TRANSLATOR_CONSOLE_LOG=simple`):
+
+```text
+09:57:12 INFO    192.168.1.20  translate · 200 · en>es · opus-mt-en-es · 117 car · 1.4 s
+09:58:40 WARNING [4f2a91c0] 192.168.1.20  translate_batch · 499 · 12 textos · es>en · 2300 car · 8.1 s — El cliente cerró la conexión...
+```
+
+En la consola solo salen las traducciones y cualquier aviso o error (con su id, para buscarlo en el archivo); `GET /`, `/models` y `/pairs` correctos solo van al archivo. La alerta inofensiva de `transformers` sobre `max_new_tokens`/`max_length` está silenciada.
+
+El archivo registra:
 
 - **Cada petición a la API**: cuándo, quién, para qué y cómo terminó.
 - **Excepciones**, con su traceback completo (fallos de carga del modelo, errores de inferencia, errores no previstos).
@@ -626,6 +657,7 @@ El catálogo define qué modelos conoce el sistema. Puedes tener **muchos defini
                              │ HTTP
                              ▼
 ┌──────────────────────────────────────────────────────────┐
+│  app/http_guards.py    →  Host (modo local) y tamaño     │
 │  app/main.py           →  Capa HTTP (FastAPI)            │
 │  app/models/schemas.py →  Validación Pydantic            │
 │  app/core/concurrency  →  Cola FIFO (sin bloquear el loop)│
@@ -664,7 +696,7 @@ pytest
 ruff check .
 ```
 
-La suite no necesita descargar modelos: usa un tokenizador y un modelo falsos. Cubre, entre otras cosas, el log (`tests/test_logging.py`) y que la API nunca intenta descargar. Incluye una prueba de integración con un modelo Marian diminuto (pesos aleatorios, sin red) que se ejecuta solo si tienes `torch`, `transformers` y `sentencepiece` instalados.
+La suite no necesita descargar modelos: usa un tokenizador y un modelo falsos. Cubre, entre otras cosas, el log (`tests/test_logging.py`), la seguridad de red (`tests/test_network_safety.py`), la cancelación y la espera estimada de la cola, y que la API nunca intenta descargar. Incluye una prueba de integración con un modelo Marian diminuto (pesos aleatorios, sin red) que se ejecuta solo si tienes `torch`, `transformers` y `sentencepiece` instalados.
 
 ---
 
@@ -709,11 +741,13 @@ Ambos conviven perfectamente en el catálogo. Usa `tier` para elegir según cont
 
 ### Cambiar el puerto o la IP de escucha
 
-Usa las variables de entorno `TRANSLATOR_PORT` y `TRANSLATOR_HOST` (ver [Configuración](#️-configuración-variables-de-entorno)).
+Usa `TRANSLATOR_PORT` en el `.env`, y `python run.py --lan` / `--local` (o `TRANSLATOR_HOST`) para la interfaz (ver [Configuración](#️-configuración-variables-de-entorno)).
 
 ### Seguridad
 
-Por defecto el servidor escucha en `0.0.0.0` **sin autenticación**: cualquier equipo de tu red puede usarlo. Para uso interno suele bastar; si no, define `TRANSLATOR_API_KEY`, o limita la escucha con `TRANSLATOR_HOST=127.0.0.1`. Si lo consume una página web, añade su origen en `TRANSLATOR_CORS_ORIGINS`.
+Por defecto el servidor escucha **solo en este equipo** (`127.0.0.1`). Con `--lan` (o `TRANSLATOR_HOST=lan`) cualquier equipo de tu red puede usarlo **sin autenticación**: para una LAN de confianza y un servidor que levantas solo cuando hace falta suele bastar. Si no, define `TRANSLATOR_API_KEY`, o escucha solo en la IP de tu tarjeta de red con `TRANSLATOR_HOST=192.168.x.x`. La API key viaja en claro (HTTP): para algo más expuesto usa una VPN o un proxy con TLS. Si lo consume una página web, añade su origen en `TRANSLATOR_CORS_ORIGINS`.
+
+Protecciones incluidas: tope de cuerpo (`413`), validación del `Host` en modo local, y errores `500` sin detalles internos.
 
 ### Parar el servidor
 
