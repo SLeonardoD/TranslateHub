@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-os.environ["TRANSLATOR_ENV_FILE"] = "off"  # los tests no leen el .env del desarrollador
+# Aislamiento: ninguna variable TRANSLATOR_* del equipo del desarrollador (su shell, las variables
+# de Windows o su .env) debe influir en los tests. app.config las lee al importarse, así que se
+# limpian ANTES. Sin esto, p. ej. TRANSLATOR_PRELOAD_MODEL o TRANSLATOR_MAX_BATCH_ITEMS=0 de tu
+# entorno real rompían tests que esperan los valores por defecto.
+for _name in [k for k in os.environ if k.upper().startswith("TRANSLATOR_")]:
+    del os.environ[_name]
+os.environ["TRANSLATOR_ENV_FILE"] = "off"  # y tampoco se lee el .env
 # TestClient usa «Host: testserver»: se simula el modo LAN para que la guarda de Host no actúe.
 os.environ["TRANSLATOR_HOST"] = "lan"
 

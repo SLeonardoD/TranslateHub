@@ -120,7 +120,7 @@ def resolve_host(raw: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     host: str = "127.0.0.1"  # por defecto solo este equipo; "lan" / 0.0.0.0 abre a la red
-    port: int = 8000
+    port: int = 9500
     device: str = "auto"  # auto | cpu | cuda
     max_loaded_models: int = 1  # modelos simultáneos en RAM (LRU)
     max_pending_requests: int = 16  # peticiones en curso + en cola
